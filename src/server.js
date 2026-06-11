@@ -39,10 +39,14 @@ const authRequests = new Map();
 const authorizationCodes = new Map();
 const accessTokens = new Map();
 const rateLimitBuckets = new Map();
+const adminLoginFailures = new Map();
+
+assertProductionSecrets();
 
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, issuer);
+    applySecurityHeaders(req, res, url);
     logRequest(req, url);
     logResponse(req, res, url);
 
@@ -94,7 +98,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/login") {
       const requestId = parseCookies(req).auth_request;
       const hasRequest = requestId && authRequests.has(requestId);
-      sendHtml(res, renderLoginPage({ error: null, username: "", hasRequest }));
+      sendHtml(res, renderLoginPage({ error: null, username: "", hasRequest, csrfToken: hasRequest ? loginCsrfToken(requestId) : "" }));
       return;
     }
 
@@ -129,8 +133,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "POST" && url.pathname === "/admin/logout") {
-      clearCookie(res, "admin_session");
-      redirect(res, "/admin");
+      await handleAdminLogout(req, res);
       return;
     }
 
@@ -157,6 +160,14 @@ const server = http.createServer(async (req, res) => {
     sendText(res, 404, "Not found");
   } catch (error) {
     console.error(error);
+    if (error?.message === "request_body_too_large") {
+      sendText(res, 413, "Request body too large");
+      return;
+    }
+    if (error instanceof SyntaxError) {
+      sendText(res, 400, "Invalid request body");
+      return;
+    }
     sendText(res, 500, "Internal server error");
   }
 });
@@ -167,6 +178,50 @@ server.listen(port, host, () => {
   console.log(`Discovery URL: ${issuer}/.well-known/openid-configuration`);
   console.log("Client secret and admin token loaded from environment");
 });
+
+function assertProductionSecrets() {
+  const productionLike = process.env.NODE_ENV === "production" || issuer.startsWith("https://");
+  if (!productionLike) return;
+
+  const defaultSecrets = new Set(["dev-secret-change-me", "dev-admin-token-change-me"]);
+  if (defaultSecrets.has(clientSecret) || defaultSecrets.has(adminToken)) {
+    throw new Error("Refusing to start in production with default OIDC_CLIENT_SECRET or ADMIN_TOKEN");
+  }
+  if (clientSecret.length < 32 || adminToken.length < 32) {
+    throw new Error("Refusing to start in production: OIDC_CLIENT_SECRET and ADMIN_TOKEN must be at least 32 characters");
+  }
+  if (!allowedRedirectUris.length) {
+    throw new Error("Refusing to start in production without ALLOWED_REDIRECT_URIS");
+  }
+}
+
+function applySecurityHeaders(req, res, url) {
+  const csp = [
+    "default-src 'self'",
+    "base-uri 'none'",
+    "connect-src 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    "img-src 'self' data:",
+    "object-src 'none'",
+    "script-src 'none'",
+    "style-src 'self'"
+  ].join("; ");
+
+  res.setHeader("Content-Security-Policy", csp);
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+
+  if (issuer.startsWith("https://")) {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  }
+  if (url.pathname.startsWith("/admin") || url.pathname === "/login") {
+    res.setHeader("Cache-Control", "no-store");
+  }
+}
 
 function handleAuthorize(req, res, url) {
   const query = Object.fromEntries(url.searchParams.entries());
@@ -210,9 +265,23 @@ async function handleLogin(req, res) {
       renderLoginPage({
         error: "登录请求已过期，请从 ChatGPT 重新发起 SSO。",
         username,
-        hasRequest: false
+        hasRequest: false,
+        csrfToken: ""
       }),
       400
+    );
+    return;
+  }
+  if (!verifyLoginCsrf(requestId, body)) {
+    sendHtml(
+      res,
+      renderLoginPage({
+        error: "登录表单已过期，请从 ChatGPT 重新发起 SSO。",
+        username,
+        hasRequest: true,
+        csrfToken: loginCsrfToken(requestId)
+      }),
+      403
     );
     return;
   }
@@ -222,7 +291,8 @@ async function handleLogin(req, res) {
       renderLoginPage({
         error: `请求太频繁，请 ${limit.retryAfterSeconds} 秒后再试。`,
         username,
-        hasRequest: true
+        hasRequest: true,
+        csrfToken: loginCsrfToken(requestId)
       }),
       429
     );
@@ -231,7 +301,7 @@ async function handleLogin(req, res) {
 
   const result = await bindUserToInvite(username, inviteCode);
   if (result.error) {
-    sendHtml(res, renderLoginPage({ error: result.error, username, hasRequest: true }), 400);
+    sendHtml(res, renderLoginPage({ error: result.error, username, hasRequest: true, csrfToken: loginCsrfToken(requestId) }), 400);
     return;
   }
 
@@ -334,6 +404,10 @@ function handleUserinfo(req, res) {
 
 async function handleCreateInvite(req, res) {
   const body = await readFormBody(req);
+  if (!hasValidAdminBearer(req) && !verifyAdminCsrf(req, body)) {
+    sendText(res, 403, "Invalid CSRF token");
+    return;
+  }
   const code = normalizeInviteCode(body.code || generateInviteCode());
   const assignedUsername = body.username ? normalizeUsername(body.username) : null;
   const reusable = parseBoolean(body.reusable);
@@ -377,12 +451,21 @@ async function handleCreateInvite(req, res) {
 }
 
 async function handleAdminLogin(req, res) {
+  const ip = clientIp(req);
+  const lock = checkAdminLoginLockout(ip);
+  if (!lock.allowed) {
+    sendHtml(res, renderAdminLoginPage(`尝试次数过多，请 ${lock.retryAfterSeconds} 秒后再试。`), 429);
+    return;
+  }
+
   const body = await readFormBody(req);
   if (!constantTimeEqual(String(body.admin_token || ""), adminToken)) {
+    recordAdminLoginFailure(ip);
     sendHtml(res, renderAdminLoginPage("Admin token 不正确。"), 401);
     return;
   }
 
+  adminLoginFailures.delete(ip);
   setCookie(res, "admin_session", signAdminSession(), {
     httpOnly: true,
     sameSite: "Lax",
@@ -393,6 +476,22 @@ async function handleAdminLogin(req, res) {
   redirect(res, "/admin");
 }
 
+async function handleAdminLogout(req, res) {
+  if (!isAdminSessionValid(req)) {
+    redirect(res, "/admin");
+    return;
+  }
+
+  const body = await readFormBody(req);
+  if (!verifyAdminCsrf(req, body)) {
+    sendText(res, 403, "Invalid CSRF token");
+    return;
+  }
+
+  clearCookie(res, "admin_session");
+  redirect(res, "/admin");
+}
+
 async function handleAdminSettings(req, res) {
   if (!isAdminSessionValid(req)) {
     redirect(res, "/admin");
@@ -400,6 +499,10 @@ async function handleAdminSettings(req, res) {
   }
 
   const body = await readFormBody(req);
+  if (!verifyAdminCsrf(req, body)) {
+    sendText(res, 403, "Invalid CSRF token");
+    return;
+  }
   settings.rateLimitEnabled = parseBoolean(body.rate_limit_enabled);
   settings.rateLimitWindowSeconds = clampNumber(body.rate_limit_window_seconds, 30, 86400, 300);
   settings.rateLimitMaxAttempts = clampNumber(body.rate_limit_max_attempts, 1, 1000, 5);
@@ -435,6 +538,32 @@ function clientIp(req) {
   return forwardedFor || req.socket.remoteAddress || "unknown";
 }
 
+function checkAdminLoginLockout(ip) {
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const maxAttempts = 8;
+  const failures = (adminLoginFailures.get(ip) || []).filter((timestamp) => now - timestamp < windowMs);
+  adminLoginFailures.set(ip, failures);
+
+  if (failures.length < maxAttempts) {
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+
+  const oldest = Math.min(...failures);
+  return {
+    allowed: false,
+    retryAfterSeconds: Math.max(1, Math.ceil((windowMs - (now - oldest)) / 1000))
+  };
+}
+
+function recordAdminLoginFailure(ip) {
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const failures = (adminLoginFailures.get(ip) || []).filter((timestamp) => now - timestamp < windowMs);
+  failures.push(now);
+  adminLoginFailures.set(ip, failures);
+}
+
 function handleAdminPage(req, res, url) {
   if (!isAdminSessionValid(req)) {
     sendHtml(res, renderAdminLoginPage(null));
@@ -442,7 +571,7 @@ function handleAdminPage(req, res, url) {
   }
 
   const query = normalizeAdminSearch(url.searchParams.get("q"));
-  sendHtml(res, renderAdminDashboard({ query }));
+  sendHtml(res, renderAdminDashboard({ query, csrfToken: adminCsrfToken(req) }));
 }
 
 function handleAdminExport(req, res, url) {
@@ -592,13 +721,17 @@ function isBrowserForm(req) {
 }
 
 function requireAdmin(req, res) {
-  const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-  if (!constantTimeEqual(token, adminToken) && !isAdminSessionValid(req)) {
+  if (!hasValidAdminBearer(req) && !isAdminSessionValid(req)) {
     sendJson(res, { error: "unauthorized" }, 401);
     return false;
   }
   return true;
+}
+
+function hasValidAdminBearer(req) {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  return constantTimeEqual(token, adminToken);
 }
 
 function constantTimeEqual(actual, expected) {
@@ -621,8 +754,14 @@ function base64urlJson(value) {
 }
 
 async function readFormBody(req) {
+  const maxBodyBytes = 32 * 1024;
   const chunks = [];
+  let size = 0;
   for await (const chunk of req) {
+    size += chunk.length;
+    if (size > maxBodyBytes) {
+      throw new Error("request_body_too_large");
+    }
     chunks.push(chunk);
   }
   const rawBody = Buffer.concat(chunks).toString("utf8");
@@ -756,6 +895,23 @@ function isAdminSessionValid(req) {
   }
 }
 
+function adminCsrfToken(req) {
+  const session = parseCookies(req).admin_session || "";
+  return crypto.createHmac("sha256", adminToken).update(`csrf:${session}`).digest("base64url");
+}
+
+function verifyAdminCsrf(req, body) {
+  return constantTimeEqual(String(body.csrf_token || ""), adminCsrfToken(req));
+}
+
+function loginCsrfToken(requestId) {
+  return crypto.createHmac("sha256", clientSecret).update(`login-csrf:${requestId}`).digest("base64url");
+}
+
+function verifyLoginCsrf(requestId, body) {
+  return constantTimeEqual(String(body.csrf_token || ""), loginCsrfToken(requestId));
+}
+
 function normalizeAdminSearch(value) {
   return String(value || "").trim().toLowerCase();
 }
@@ -853,7 +1009,7 @@ async function serveStatic(res, relativePath) {
   res.end(content);
 }
 
-function renderLoginPage({ error, username, hasRequest }) {
+function renderLoginPage({ error, username, hasRequest, csrfToken }) {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -880,6 +1036,7 @@ function renderLoginPage({ error, username, hasRequest }) {
       ${!hasRequest ? `<div class="alert muted" role="status">请从 ChatGPT SSO 登录流程进入此页面。</div>` : ""}
 
       <form method="post" action="/login" autocomplete="off">
+        <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken || "")}" />
         <label for="username">用户名</label>
         <input id="username" name="username" value="${escapeHtml(username)}" placeholder="zhangsan" required minlength="3" maxlength="40" pattern="[A-Za-z0-9._-]{3,40}" />
 
@@ -921,7 +1078,7 @@ function renderAdminLoginPage(error) {
 </html>`;
 }
 
-function renderAdminDashboard({ query }) {
+function renderAdminDashboard({ query, csrfToken }) {
   const rows = adminRows(query);
   const allRows = adminRows("");
   const boundCount = allRows.filter((row) => row.boundUsername).length;
@@ -942,6 +1099,7 @@ function renderAdminDashboard({ query }) {
       <h1>邀请码管理</h1>
     </div>
     <form method="post" action="/admin/logout">
+      <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}" />
       <button class="secondary" type="submit">退出</button>
     </form>
   </header>
@@ -957,6 +1115,7 @@ function renderAdminDashboard({ query }) {
     <section class="admin-grid">
       <form class="admin-card" method="post" action="/admin/invites">
         <h2>创建邀请码</h2>
+        <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}" />
         <label for="code">邀请码</label>
         <input id="code" name="code" placeholder="留空自动生成" />
 
@@ -976,6 +1135,7 @@ function renderAdminDashboard({ query }) {
 
       <form class="admin-card" method="post" action="/admin/settings">
         <h2>注册限速</h2>
+        <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}" />
         <label class="check-row">
           <input type="checkbox" name="rate_limit_enabled" value="true" ${settings.rateLimitEnabled ? "checked" : ""} />
           <span>按 IP 限制登录/注册提交</span>

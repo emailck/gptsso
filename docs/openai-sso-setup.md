@@ -261,6 +261,14 @@ OAI-REUSE-2026
 
 ## Admin API
 
+The web admin dashboard is:
+
+```text
+https://auth.oai-gpt.com/admin
+```
+
+Use the `ADMIN_TOKEN` stored in `/home/ubuntu/gptsso-secrets.txt` to sign in. The dashboard supports creating standard, assigned-user, and reusable invite codes, exporting CSV, and enabling IP-based registration/login rate limiting.
+
 List invites and users:
 
 ```bash
@@ -293,6 +301,40 @@ curl -X POST http://127.0.0.1:3001/admin/invites \
   -H "Authorization: Bearer ${ADMIN_TOKEN}" \
   --data-urlencode "code=OAI-REUSE-2026" \
   --data-urlencode "reusable=true"
+```
+
+## Security Hardening
+
+The service currently applies these protections:
+
+```text
+HTTPS through Caddy
+Strict security headers and CSP
+No-store caching on login/admin pages
+Signed HttpOnly admin session cookie
+CSRF checks for browser admin POST actions
+Admin login failure lockout by IP
+32 KB request body limit
+Production startup checks for strong secrets and redirect URI allowlist
+Optional IP-based rate limiting for /login submissions
+```
+
+Keep these files private and never commit them:
+
+```text
+/opt/gptsso/.env
+/home/ubuntu/gptsso-secrets.txt
+/opt/gptsso/data/oidc-private-key.pem
+```
+
+Recommended operational settings:
+
+```text
+Use a long random ADMIN_TOKEN
+Keep ChatGPT SSO settings set to Required when enforcing SSO
+Enable Automatic Account Creation only if new SSO users should join automatically
+Turn on registration rate limiting before distributing reusable invite codes
+Use firewall or WAF rules if the service receives public abuse traffic
 ```
 
 ## Troubleshooting

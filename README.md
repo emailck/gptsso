@@ -9,6 +9,8 @@ It includes:
 - Persistent users, invite codes, and signing key in `data/`
 - Username plus invite-code binding
 - Admin API for creating and listing invite codes
+- Web admin dashboard with signed session cookies and CSRF protection
+- Optional IP-based login/register rate limiting
 - Optional redirect URI allowlist
 
 ## Run
@@ -115,6 +117,9 @@ The OIDC `sub` and email are stable. For username `zhangsan` and `VERIFIED_DOMAI
 
 - Change `OIDC_CLIENT_SECRET` and `ADMIN_TOKEN`.
 - Put the app behind HTTPS.
+- Keep `ALLOWED_REDIRECT_URIS` configured. In production the app refuses to start without it.
+- Keep `ADMIN_TOKEN` long and random. The admin dashboard has login lockout, CSRF protection, no-store caching, and strict security headers, but the token is still the main admin secret.
+- Enable the registration rate limit from `/admin` before sharing reusable invite codes publicly.
 - Back up `data/`, especially `oidc-private-key.pem`. If the key changes, ChatGPT must refetch JWKS and existing sessions may fail validation.
-- Keep `ALLOWED_REDIRECT_URIS` enabled in production.
 - Replace the JSON store with a database before high-volume use or multi-instance deployment.
+- For stronger edge protection, add provider-level firewall/WAF rules in front of the server.
