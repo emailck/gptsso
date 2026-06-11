@@ -244,6 +244,7 @@ Created with:
 
 ```text
 reusable=true
+max_uses=10   # optional
 ```
 
 Behavior:
@@ -251,6 +252,8 @@ Behavior:
 ```text
 Different usernames can use the same invite code.
 The code does not bind to one user.
+If max_uses is set, each new username consumes one use.
+The same username signing in again does not consume another use.
 ```
 
 Current reusable invite:
@@ -267,7 +270,7 @@ The web admin dashboard is:
 https://auth.oai-gpt.com/admin
 ```
 
-Use the `ADMIN_TOKEN` stored in `/home/ubuntu/gptsso-secrets.txt` to sign in. The dashboard supports creating standard, assigned-user, and reusable invite codes, exporting CSV, and enabling IP-based registration/login rate limiting.
+Use the `ADMIN_TOKEN` stored in `/home/ubuntu/gptsso-secrets.txt` to sign in. The dashboard supports creating standard, assigned-user, and reusable invite codes with optional usage limits, exporting CSV, and enabling IP-based registration/login rate limiting.
 
 List invites and users:
 
@@ -301,6 +304,16 @@ curl -X POST http://127.0.0.1:3001/admin/invites \
   -H "Authorization: Bearer ${ADMIN_TOKEN}" \
   --data-urlencode "code=OAI-REUSE-2026" \
   --data-urlencode "reusable=true"
+```
+
+Create a reusable invite that can be used by up to 10 different usernames:
+
+```bash
+curl -X POST http://127.0.0.1:3001/admin/invites \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  --data-urlencode "code=OAI-REUSE-10" \
+  --data-urlencode "reusable=true" \
+  --data-urlencode "max_uses=10"
 ```
 
 ## Security Hardening

@@ -65,7 +65,7 @@ Web admin dashboard:
 https://auth.your-domain.com/admin
 ```
 
-Use `ADMIN_TOKEN` to sign in. The dashboard can list/search invites, create standard invites, create assigned-username invites, create reusable invites, and export CSV.
+Use `ADMIN_TOKEN` to sign in. The dashboard can list/search invites, create standard invites, create assigned-username invites, create reusable invites with an optional usage limit, and export CSV.
 
 List invite codes and users:
 
@@ -94,6 +94,16 @@ Invoke-RestMethod `
   -Headers @{ Authorization = "Bearer dev-admin-token-change-me" }
 ```
 
+Create a reusable invite code that can be used by up to 10 different usernames:
+
+```powershell
+Invoke-RestMethod `
+  -Uri "http://localhost:3000/admin/invites" `
+  -Method Post `
+  -Headers @{ Authorization = "Bearer dev-admin-token-change-me" } `
+  -Body @{ code = "TEAM-REUSE"; reusable = "true"; max_uses = "10" }
+```
+
 ## Login behavior
 
 Rules:
@@ -102,6 +112,7 @@ Rules:
 - Existing username plus that user's bound invite code: allow login.
 - Invite already bound to another user: reject.
 - Username already bound through another invite: reject.
+- Reusable invite with `max_uses`: each new username consumes one use; the same username signing in again does not consume another use.
 
 The OIDC `sub` and email are stable. For username `zhangsan` and `VERIFIED_DOMAIN=your-domain.com`, the token contains:
 

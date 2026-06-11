@@ -411,6 +411,7 @@ async function handleCreateInvite(req, res) {
   const code = normalizeInviteCode(body.code || generateInviteCode());
   const assignedUsername = body.username ? normalizeUsername(body.username) : null;
   const reusable = parseBoolean(body.reusable);
+  const maxUses = parseOptionalPositiveInteger(body.max_uses, 100000);
   const expiresAt = body.expires_at ? new Date(body.expires_at).toISOString() : null;
 
   if (!/^[A-Z0-9-]{6,64}$/.test(code)) {
@@ -429,6 +430,14 @@ async function handleCreateInvite(req, res) {
     sendJson(res, { error: "username must be 3-40 chars: letters, numbers, dot, underscore, or hyphen" }, 400);
     return;
   }
+  if (maxUses.error) {
+    sendJson(res, { error: "max_uses must be an integer between 1 and 100000, or empty" }, 400);
+    return;
+  }
+  if (maxUses.value && !reusable) {
+    sendJson(res, { error: "max_uses can only be set for reusable invites" }, 400);
+    return;
+  }
 
   const invite = {
     code,
@@ -437,6 +446,8 @@ async function handleCreateInvite(req, res) {
     assignedUsername,
     boundUserId: null,
     usedCount: 0,
+    maxUses: maxUses.value,
+    usedUserIds: reusable ? [] : null,
     expiresAt,
     usedAt: null,
     createdAt: new Date().toISOString()
@@ -639,11 +650,23 @@ async function bindUserToInvite(username, inviteCode) {
 
   const userId = stableUserId(username);
   const existingUser = users.get(userId);
+  const usedUserIds = inviteUsedUserIds(invite);
+  const hasUsedReusableInvite = Boolean(invite.reusable && usedUserIds.has(userId));
 
   if (!invite.reusable && invite.boundUserId && invite.boundUserId !== userId) {
     return { error: "这个邀请码已经绑定了其他用户。" };
   }
-  if (existingUser && (invite.reusable || invite.boundUserId === userId)) {
+  if (invite.reusable && !hasUsedReusableInvite && inviteUsageLimitReached(invite)) {
+    return { error: "这个邀请码的使用次数已经用完。" };
+  }
+  if (existingUser && invite.reusable) {
+    if (!hasUsedReusableInvite && Array.isArray(invite.usedUserIds)) {
+      markReusableInviteUsed(invite, userId);
+      await saveStore();
+    }
+    return { user: existingUser };
+  }
+  if (existingUser && invite.boundUserId === userId) {
     return { user: existingUser };
   }
   if (existingUser && !invite.reusable && invite.boundUserId !== userId) {
@@ -660,14 +683,34 @@ async function bindUserToInvite(username, inviteCode) {
     createdAt: new Date().toISOString()
   };
   users.set(userId, user);
-  invite.usedCount = Number(invite.usedCount || 0) + 1;
-  if (!invite.reusable) {
+  if (invite.reusable) {
+    markReusableInviteUsed(invite, userId);
+  } else {
+    invite.usedCount = Number(invite.usedCount || 0) + 1;
     invite.status = "bound";
     invite.boundUserId = userId;
+    invite.usedAt = new Date().toISOString();
   }
-  invite.usedAt = new Date().toISOString();
   await saveStore();
   return { user };
+}
+
+function inviteUsedUserIds(invite) {
+  return new Set(Array.isArray(invite.usedUserIds) ? invite.usedUserIds : []);
+}
+
+function inviteUsageLimitReached(invite) {
+  const maxUses = Number(invite.maxUses || 0);
+  return maxUses > 0 && Number(invite.usedCount || 0) >= maxUses;
+}
+
+function markReusableInviteUsed(invite, userId) {
+  const usedUserIds = inviteUsedUserIds(invite);
+  if (usedUserIds.has(userId)) return;
+  usedUserIds.add(userId);
+  invite.usedUserIds = [...usedUserIds];
+  invite.usedCount = Number(invite.usedCount || 0) + 1;
+  invite.usedAt = new Date().toISOString();
 }
 
 function userClaims(user) {
@@ -844,7 +887,12 @@ function makeInvite(code) {
   return {
     code,
     status: "available",
+    reusable: false,
+    assignedUsername: null,
     boundUserId: null,
+    usedCount: 0,
+    maxUses: null,
+    usedUserIds: null,
     expiresAt: null,
     usedAt: null,
     createdAt: new Date().toISOString()
@@ -864,6 +912,15 @@ function parseCsv(value) {
 
 function parseBoolean(value) {
   return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
+}
+
+function parseOptionalPositiveInteger(value, max) {
+  const text = String(value || "").trim();
+  if (!text) return { value: null };
+  if (!/^\d+$/.test(text)) return { error: true };
+  const number = Number(text);
+  if (!Number.isSafeInteger(number) || number < 1 || number > max) return { error: true };
+  return { value: number };
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -920,12 +977,14 @@ function adminRows(query) {
   return [...inviteCodes.values()]
     .map((invite) => {
       const user = invite.boundUserId ? users.get(invite.boundUserId) : null;
+      const exhausted = Boolean(invite.reusable && inviteUsageLimitReached(invite));
       return {
         code: invite.code,
-        status: invite.status || "available",
+        status: exhausted ? "exhausted" : invite.status || "available",
         reusable: Boolean(invite.reusable),
         assignedUsername: invite.assignedUsername || "",
         usedCount: Number(invite.usedCount || 0),
+        maxUses: Number(invite.maxUses || 0),
         boundUsername: user?.username || "",
         email: user?.email || "",
         usedAt: invite.usedAt || "",
@@ -1130,6 +1189,9 @@ function renderAdminDashboard({ query, csrfToken }) {
           <span>可重复使用</span>
         </label>
 
+        <label for="max_uses">最大使用次数</label>
+        <input id="max_uses" name="max_uses" type="number" min="1" max="100000" placeholder="可选，仅可重复邀请码" />
+
         <button type="submit">创建</button>
       </form>
 
@@ -1153,6 +1215,7 @@ function renderAdminDashboard({ query, csrfToken }) {
       <section class="admin-card">
         <h2>使用说明</h2>
         <p>普通邀请码第一次使用后会绑定用户名。指定用户名的邀请码只能给该用户名使用。可重复邀请码允许多个不同用户名使用。</p>
+        <p>可重复邀请码可以设置最大使用次数。不同用户名首次使用会消耗次数，同一用户名后续登录不会重复消耗。</p>
         <p>用户在 IdP 登录页只填用户名，不填完整邮箱；系统会自动生成 <code>用户名@${escapeHtml(verifiedDomain)}</code>。</p>
         <p>当前注册限速：<strong>${settings.rateLimitEnabled ? "已开启" : "已关闭"}</strong>。开启后同一 IP 在 ${escapeHtml(String(settings.rateLimitWindowSeconds))} 秒内最多提交 ${escapeHtml(String(settings.rateLimitMaxAttempts))} 次。</p>
       </section>
@@ -1178,11 +1241,12 @@ function renderAdminDashboard({ query, csrfToken }) {
               <th>绑定用户名</th>
               <th>邮箱</th>
               <th>使用次数</th>
+              <th>次数上限</th>
               <th>创建时间</th>
             </tr>
           </thead>
           <tbody>
-            ${rows.map(renderAdminRow).join("") || `<tr><td colspan="8" class="empty">没有匹配结果</td></tr>`}
+            ${rows.map(renderAdminRow).join("") || `<tr><td colspan="9" class="empty">没有匹配结果</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -1194,20 +1258,23 @@ function renderAdminDashboard({ query, csrfToken }) {
 
 function renderAdminRow(row) {
   const type = row.reusable ? "可重复" : row.assignedUsername ? "指定用户" : "普通";
+  const statusText = row.status === "exhausted" ? "已用完" : row.boundUsername ? "已绑定" : "可用";
+  const statusClass = row.status === "exhausted" ? "bound" : row.boundUsername ? "bound" : "available";
   return `<tr>
     <td><code>${escapeHtml(row.code)}</code></td>
     <td>${escapeHtml(type)}</td>
-    <td><span class="status ${row.boundUsername ? "bound" : "available"}">${row.boundUsername ? "已绑定" : "可用"}</span></td>
+    <td><span class="status ${statusClass}">${escapeHtml(statusText)}</span></td>
     <td>${escapeHtml(row.assignedUsername || "-")}</td>
     <td>${escapeHtml(row.boundUsername || "-")}</td>
     <td>${escapeHtml(row.email || "-")}</td>
     <td>${escapeHtml(String(row.usedCount))}</td>
+    <td>${escapeHtml(row.maxUses ? String(row.maxUses) : "不限")}</td>
     <td>${escapeHtml(row.createdAt || "-")}</td>
   </tr>`;
 }
 
 function toCsv(rows) {
-  const header = ["code", "type", "status", "assignedUsername", "boundUsername", "email", "usedCount", "createdAt", "usedAt"];
+  const header = ["code", "type", "status", "assignedUsername", "boundUsername", "email", "usedCount", "maxUses", "createdAt", "usedAt"];
   const lines = rows.map((row) => [
     row.code,
     row.reusable ? "reusable" : row.assignedUsername ? "assigned" : "standard",
@@ -1216,6 +1283,7 @@ function toCsv(rows) {
     row.boundUsername,
     row.email,
     row.usedCount,
+    row.maxUses || "",
     row.createdAt,
     row.usedAt
   ].map(csvCell).join(","));
