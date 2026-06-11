@@ -286,6 +286,7 @@ async function handleCreateInvite(req, res) {
   const body = await readFormBody(req);
   const code = normalizeInviteCode(body.code || generateInviteCode());
   const assignedUsername = body.username ? normalizeUsername(body.username) : null;
+  const reusable = parseBoolean(body.reusable);
   const expiresAt = body.expires_at ? new Date(body.expires_at).toISOString() : null;
 
   if (!/^[A-Z0-9-]{6,64}$/.test(code)) {
@@ -308,8 +309,10 @@ async function handleCreateInvite(req, res) {
   const invite = {
     code,
     status: "available",
+    reusable,
     assignedUsername,
     boundUserId: null,
+    usedCount: 0,
     expiresAt,
     usedAt: null,
     createdAt: new Date().toISOString()
@@ -370,13 +373,13 @@ async function bindUserToInvite(username, inviteCode) {
   const userId = stableUserId(username);
   const existingUser = users.get(userId);
 
-  if (invite.boundUserId && invite.boundUserId !== userId) {
+  if (!invite.reusable && invite.boundUserId && invite.boundUserId !== userId) {
     return { error: "这个邀请码已经绑定了其他用户。" };
   }
-  if (existingUser && invite.boundUserId === userId) {
+  if (existingUser && (invite.reusable || invite.boundUserId === userId)) {
     return { user: existingUser };
   }
-  if (existingUser && invite.boundUserId !== userId) {
+  if (existingUser && !invite.reusable && invite.boundUserId !== userId) {
     return { error: "这个用户名已经绑定过其他邀请码。" };
   }
 
@@ -390,8 +393,11 @@ async function bindUserToInvite(username, inviteCode) {
     createdAt: new Date().toISOString()
   };
   users.set(userId, user);
-  invite.status = "bound";
-  invite.boundUserId = userId;
+  invite.usedCount = Number(invite.usedCount || 0) + 1;
+  if (!invite.reusable) {
+    invite.status = "bound";
+    invite.boundUserId = userId;
+  }
   invite.usedAt = new Date().toISOString();
   await saveStore();
   return { user };
@@ -565,6 +571,10 @@ function parseCsv(value) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function parseBoolean(value) {
+  return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
 }
 
 function logRequest(req, url) {
