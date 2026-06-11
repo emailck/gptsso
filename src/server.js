@@ -9,6 +9,7 @@ const rootDir = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 await loadEnvFile(join(rootDir, ".env"));
 
 const port = Number(process.env.PORT || 3000);
+const host = process.env.HOST || "127.0.0.1";
 const issuer = process.env.ISSUER || `http://localhost:${port}`;
 const verifiedDomain = process.env.VERIFIED_DOMAIN || "example.com";
 const clientId = process.env.OIDC_CLIENT_ID || "chatgpt";
@@ -111,8 +112,8 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(port, () => {
-  console.log(`OIDC IdP running at ${issuer}`);
+server.listen(port, host, () => {
+  console.log(`OIDC IdP running at ${issuer} on ${host}:${port}`);
   console.log(`Client ID: ${clientId}`);
   console.log(`Discovery URL: ${issuer}/.well-known/openid-configuration`);
   console.log("Client secret and admin token loaded from environment");
