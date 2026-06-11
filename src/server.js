@@ -28,11 +28,17 @@ publicJwk.use = "sig";
 publicJwk.alg = "RS256";
 
 const store = await loadStore();
+const settings = {
+  rateLimitEnabled: Boolean(store.settings?.rateLimitEnabled),
+  rateLimitWindowSeconds: Number(store.settings?.rateLimitWindowSeconds || 300),
+  rateLimitMaxAttempts: Number(store.settings?.rateLimitMaxAttempts || 5)
+};
 const users = new Map(store.users.map((user) => [user.id, user]));
 const inviteCodes = new Map(store.invites.map((invite) => [invite.code, invite]));
 const authRequests = new Map();
 const authorizationCodes = new Map();
 const accessTokens = new Map();
+const rateLimitBuckets = new Map();
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -128,6 +134,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/admin/settings") {
+      await handleAdminSettings(req, res);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/admin/invites") {
       if (!requireAdmin(req, res)) return;
       sendJson(res, {
@@ -191,6 +202,7 @@ async function handleLogin(req, res) {
   const body = await readFormBody(req);
   const username = normalizeUsername(body.username);
   const inviteCode = normalizeInviteCode(body.invite_code);
+  const limit = checkRateLimit(req);
 
   if (!authRequest) {
     sendHtml(
@@ -201,6 +213,18 @@ async function handleLogin(req, res) {
         hasRequest: false
       }),
       400
+    );
+    return;
+  }
+  if (!limit.allowed) {
+    sendHtml(
+      res,
+      renderLoginPage({
+        error: `请求太频繁，请 ${limit.retryAfterSeconds} 秒后再试。`,
+        username,
+        hasRequest: true
+      }),
+      429
     );
     return;
   }
@@ -367,6 +391,48 @@ async function handleAdminLogin(req, res) {
     path: "/"
   });
   redirect(res, "/admin");
+}
+
+async function handleAdminSettings(req, res) {
+  if (!isAdminSessionValid(req)) {
+    redirect(res, "/admin");
+    return;
+  }
+
+  const body = await readFormBody(req);
+  settings.rateLimitEnabled = parseBoolean(body.rate_limit_enabled);
+  settings.rateLimitWindowSeconds = clampNumber(body.rate_limit_window_seconds, 30, 86400, 300);
+  settings.rateLimitMaxAttempts = clampNumber(body.rate_limit_max_attempts, 1, 1000, 5);
+  rateLimitBuckets.clear();
+  await saveStore();
+  redirect(res, "/admin");
+}
+
+function checkRateLimit(req) {
+  if (!settings.rateLimitEnabled) {
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+
+  const ip = clientIp(req);
+  const now = Date.now();
+  const windowMs = settings.rateLimitWindowSeconds * 1000;
+  const bucket = rateLimitBuckets.get(ip) || [];
+  const recent = bucket.filter((timestamp) => now - timestamp < windowMs);
+  if (recent.length >= settings.rateLimitMaxAttempts) {
+    const oldest = Math.min(...recent);
+    const retryAfterSeconds = Math.max(1, Math.ceil((windowMs - (now - oldest)) / 1000));
+    rateLimitBuckets.set(ip, recent);
+    return { allowed: false, retryAfterSeconds };
+  }
+
+  recent.push(now);
+  rateLimitBuckets.set(ip, recent);
+  return { allowed: true, retryAfterSeconds: 0 };
+}
+
+function clientIp(req) {
+  const forwardedFor = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return forwardedFor || req.socket.remoteAddress || "unknown";
 }
 
 function handleAdminPage(req, res, url) {
@@ -571,6 +637,11 @@ async function loadStore() {
   await mkdir(dataDir, { recursive: true });
   if (!existsSync(dataFile)) {
     const initialStore = {
+      settings: {
+        rateLimitEnabled: false,
+        rateLimitWindowSeconds: 300,
+        rateLimitMaxAttempts: 5
+      },
       users: [],
       invites: [
         makeInvite("ALPHA-2026"),
@@ -583,6 +654,7 @@ async function loadStore() {
 
   const parsed = JSON.parse(await readFile(dataFile, "utf8"));
   return {
+    settings: parsed.settings && typeof parsed.settings === "object" ? parsed.settings : {},
     users: Array.isArray(parsed.users) ? parsed.users : [],
     invites: Array.isArray(parsed.invites) ? parsed.invites : []
   };
@@ -605,6 +677,7 @@ async function loadEnvFile(filePath) {
 
 async function saveStore() {
   await writeJsonAtomic(dataFile, {
+    settings,
     users: [...users.values()],
     invites: [...inviteCodes.values()]
   });
@@ -652,6 +725,12 @@ function parseCsv(value) {
 
 function parseBoolean(value) {
   return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(number)));
 }
 
 function signAdminSession() {
@@ -895,10 +974,27 @@ function renderAdminDashboard({ query }) {
         <button type="submit">创建</button>
       </form>
 
+      <form class="admin-card" method="post" action="/admin/settings">
+        <h2>注册限速</h2>
+        <label class="check-row">
+          <input type="checkbox" name="rate_limit_enabled" value="true" ${settings.rateLimitEnabled ? "checked" : ""} />
+          <span>按 IP 限制登录/注册提交</span>
+        </label>
+
+        <label for="rate_limit_window_seconds">时间窗口，秒</label>
+        <input id="rate_limit_window_seconds" name="rate_limit_window_seconds" type="number" min="30" max="86400" value="${escapeHtml(String(settings.rateLimitWindowSeconds))}" />
+
+        <label for="rate_limit_max_attempts">窗口内允许次数</label>
+        <input id="rate_limit_max_attempts" name="rate_limit_max_attempts" type="number" min="1" max="1000" value="${escapeHtml(String(settings.rateLimitMaxAttempts))}" />
+
+        <button type="submit">保存设置</button>
+      </form>
+
       <section class="admin-card">
         <h2>使用说明</h2>
         <p>普通邀请码第一次使用后会绑定用户名。指定用户名的邀请码只能给该用户名使用。可重复邀请码允许多个不同用户名使用。</p>
         <p>用户在 IdP 登录页只填用户名，不填完整邮箱；系统会自动生成 <code>用户名@${escapeHtml(verifiedDomain)}</code>。</p>
+        <p>当前注册限速：<strong>${settings.rateLimitEnabled ? "已开启" : "已关闭"}</strong>。开启后同一 IP 在 ${escapeHtml(String(settings.rateLimitWindowSeconds))} 秒内最多提交 ${escapeHtml(String(settings.rateLimitMaxAttempts))} 次。</p>
       </section>
     </section>
 
