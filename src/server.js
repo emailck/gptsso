@@ -228,6 +228,8 @@ async function handleToken(req, res) {
       email: user.email,
       email_verified: true,
       name: user.username,
+      given_name: user.givenName || user.username,
+      family_name: user.familyName || "User",
       preferred_username: user.username,
       nonce: codeRecord.nonce
     },
@@ -323,6 +325,8 @@ async function bindUserToInvite(username, inviteCode) {
     username,
     email: `${username}@${verifiedDomain}`.toLowerCase(),
     oidcSub: userId,
+    givenName: username,
+    familyName: "User",
     createdAt: new Date().toISOString()
   };
   users.set(userId, user);
