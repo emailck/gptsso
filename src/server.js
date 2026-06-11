@@ -112,6 +112,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/admin/export.csv") {
+      handleAdminExport(req, res, url);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/admin/login") {
       await handleAdminLogin(req, res);
       return;
@@ -372,6 +377,21 @@ function handleAdminPage(req, res, url) {
 
   const query = normalizeAdminSearch(url.searchParams.get("q"));
   sendHtml(res, renderAdminDashboard({ query }));
+}
+
+function handleAdminExport(req, res, url) {
+  if (!isAdminSessionValid(req)) {
+    redirect(res, "/admin");
+    return;
+  }
+
+  const query = normalizeAdminSearch(url.searchParams.get("q"));
+  const csv = toCsv(adminRows(query));
+  res.writeHead(200, {
+    "Content-Type": "text/csv; charset=utf-8",
+    "Content-Disposition": "attachment; filename=\"gptsso-invites.csv\""
+  });
+  res.end(csv);
 }
 
 function validateAuthorizeRequest(query) {
@@ -827,7 +847,6 @@ function renderAdminDashboard({ query }) {
   const allRows = adminRows("");
   const boundCount = allRows.filter((row) => row.boundUsername).length;
   const reusableCount = allRows.filter((row) => row.reusable).length;
-  const csv = toCsv(rows);
 
   return `<!doctype html>
 <html lang="zh-CN">
@@ -889,7 +908,7 @@ function renderAdminDashboard({ query }) {
           <input name="q" value="${escapeHtml(query)}" placeholder="搜索邀请码、用户名、邮箱" />
           <button class="secondary" type="submit">搜索</button>
         </form>
-        <a class="download" href="data:text/csv;charset=utf-8,${encodeURIComponent(csv)}" download="gptsso-invites.csv">导出 CSV</a>
+        <a class="download" href="/admin/export.csv${query ? `?q=${encodeURIComponent(query)}` : ""}">导出 CSV</a>
       </div>
 
       <div class="table-wrap">
