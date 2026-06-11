@@ -36,6 +36,7 @@ const authorizationCodes = new Map();
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, issuer);
+    logRequest(req, url);
 
     if (req.method === "GET" && url.pathname === "/") {
       redirect(res, "/login");
@@ -489,6 +490,14 @@ function parseCsv(value) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function logRequest(req, url) {
+  const safeParams = new URLSearchParams(url.searchParams);
+  if (safeParams.has("client_secret")) safeParams.set("client_secret", "[redacted]");
+  if (safeParams.has("code")) safeParams.set("code", "[redacted]");
+  const query = safeParams.toString();
+  console.log(`${new Date().toISOString()} ${req.method} ${url.pathname}${query ? `?${query}` : ""}`);
 }
 
 function parseCookies(req) {
