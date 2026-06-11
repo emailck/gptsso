@@ -746,7 +746,8 @@ function isValidUsername(username) {
 }
 
 function normalizeUsername(value) {
-  return String(value || "").trim().toLowerCase();
+  const text = String(value || "").trim().toLowerCase();
+  return text.includes("@") ? text.split("@")[0] : text;
 }
 
 function normalizeInviteCode(value) {
@@ -1109,7 +1110,7 @@ function renderLoginPage({ error, username, hasRequest, csrfToken }) {
       <form method="post" action="/login" autocomplete="off">
         <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken || "")}" />
         <label for="username">用户名</label>
-        <input id="username" name="username" value="${escapeHtml(username)}" placeholder="zhangsan" required minlength="3" maxlength="40" pattern="[A-Za-z0-9._-]{3,40}" />
+        <input id="username" name="username" value="${escapeHtml(username)}" placeholder="zhangsan 或 zhangsan@${escapeHtml(verifiedDomain)}" required minlength="3" maxlength="80" />
 
         <label for="invite_code">邀请码</label>
         <input id="invite_code" name="invite_code" placeholder="ALPHA-2026" required />
