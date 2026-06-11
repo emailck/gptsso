@@ -272,6 +272,7 @@ async function handleLogin(req, res) {
   const limit = checkRateLimit(req);
 
   if (!authRequest) {
+    logLoginEvent(req, "auth_request_missing", { username });
     sendHtml(
       res,
       renderLoginPage({
@@ -285,6 +286,7 @@ async function handleLogin(req, res) {
     return;
   }
   if (!verifyLoginCsrf(requestId, body)) {
+    logLoginEvent(req, "csrf_invalid", { username });
     sendHtml(
       res,
       renderLoginPage({
@@ -298,6 +300,7 @@ async function handleLogin(req, res) {
     return;
   }
   if (!limit.allowed) {
+    logLoginEvent(req, "rate_limited", { username, retryAfterSeconds: limit.retryAfterSeconds });
     sendHtml(
       res,
       renderLoginPage({
@@ -313,9 +316,11 @@ async function handleLogin(req, res) {
 
   const result = await bindUserToInvite(username, inviteCode);
   if (result.error) {
+    logLoginEvent(req, "invite_error", { username, reason: result.error });
     sendHtml(res, renderLoginPage({ error: result.error, username, hasRequest: true, csrfToken: loginCsrfToken(requestId) }), 400);
     return;
   }
+  logLoginEvent(req, "success", { username, userId: result.user.id });
 
   const code = crypto.randomBytes(32).toString("base64url");
   authorizationCodes.set(code, {
@@ -559,6 +564,10 @@ function checkRateLimit(req) {
 function clientIp(req) {
   const forwardedFor = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
   return forwardedFor || req.socket.remoteAddress || "unknown";
+}
+
+function logLoginEvent(req, event, details = {}) {
+  console.log(`${new Date().toISOString()} LOGIN ${event} ip=${clientIp(req)} ${JSON.stringify(details)}`);
 }
 
 function checkAdminLoginLockout(ip) {
@@ -1107,7 +1116,7 @@ function renderLoginPage({ error, username, hasRequest, csrfToken }) {
       ${error ? `<div class="alert" role="alert">${escapeHtml(error)}</div>` : ""}
       ${!hasRequest ? `<div class="alert muted" role="status">请从 ChatGPT SSO 登录流程进入此页面。</div>` : ""}
 
-      <form method="post" action="/login" autocomplete="off">
+      <form method="post" action="/login" autocomplete="off" novalidate>
         <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken || "")}" />
         <label for="username">用户名</label>
         <input id="username" name="username" value="${escapeHtml(username)}" placeholder="zhangsan 或 zhangsan@${escapeHtml(verifiedDomain)}" required minlength="3" maxlength="80" />
