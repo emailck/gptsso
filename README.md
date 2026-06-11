@@ -53,6 +53,8 @@ Use these values when configuring Custom OIDC:
 
 Copy the redirect URI provided by ChatGPT into `ALLOWED_REDIRECT_URIS` before going live. Use the exact URL shown in the OpenAI setup wizard.
 
+The full production OpenAI setup process is documented in [docs/openai-sso-setup.md](docs/openai-sso-setup.md).
+
 ## Admin API
 
 List invite codes and users:
