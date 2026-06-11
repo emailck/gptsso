@@ -38,6 +38,7 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, issuer);
     logRequest(req, url);
+    logResponse(req, res, url);
 
     if (req.method === "GET" && url.pathname === "/") {
       redirect(res, "/login");
@@ -59,6 +60,7 @@ const server = http.createServer(async (req, res) => {
         response_types_supported: ["code"],
         response_modes_supported: ["query"],
         grant_types_supported: ["authorization_code"],
+        code_challenge_methods_supported: ["S256", "plain"],
         subject_types_supported: ["public"],
         id_token_signing_alg_values_supported: ["RS256"],
         scopes_supported: ["openid", "email", "profile"],
@@ -143,7 +145,9 @@ function handleAuthorize(req, res, url) {
     redirectUri: query.redirect_uri,
     scope: query.scope || "openid email profile",
     state: query.state,
-    nonce: query.nonce
+    nonce: query.nonce,
+    codeChallenge: query.code_challenge,
+    codeChallengeMethod: query.code_challenge_method || "plain"
   });
 
   setCookie(res, "auth_request", requestId, {
@@ -188,6 +192,8 @@ async function handleLogin(req, res) {
     redirectUri: authRequest.redirectUri,
     nonce: authRequest.nonce,
     scope: authRequest.scope,
+    codeChallenge: authRequest.codeChallenge,
+    codeChallengeMethod: authRequest.codeChallengeMethod,
     expiresAt: Date.now() + 5 * 60 * 1000
   });
   authRequests.delete(requestId);
@@ -222,6 +228,10 @@ async function handleToken(req, res) {
 
   if (codeRecord.clientId !== auth.clientId || codeRecord.redirectUri !== body.redirect_uri) {
     sendJson(res, { error: "invalid_grant" }, 400);
+    return;
+  }
+  if (!verifyPkce(codeRecord, body.code_verifier)) {
+    sendJson(res, { error: "invalid_grant", error_description: "PKCE verification failed" }, 400);
     return;
   }
 
@@ -319,7 +329,20 @@ function validateAuthorizeRequest(query) {
   if (!String(query.scope || "").split(" ").includes("openid")) {
     return { error: "scope must include openid" };
   }
+  if (query.code_challenge_method && !["S256", "plain"].includes(query.code_challenge_method)) {
+    return { error: "unsupported code_challenge_method" };
+  }
   return {};
+}
+
+function verifyPkce(codeRecord, codeVerifier) {
+  if (!codeRecord.codeChallenge) return true;
+  if (!codeVerifier) return false;
+  if (codeRecord.codeChallengeMethod === "S256") {
+    const digest = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
+    return constantTimeEqual(digest, codeRecord.codeChallenge);
+  }
+  return constantTimeEqual(codeVerifier, codeRecord.codeChallenge);
 }
 
 async function bindUserToInvite(username, inviteCode) {
@@ -537,6 +560,12 @@ function logRequest(req, url) {
   if (safeParams.has("code")) safeParams.set("code", "[redacted]");
   const query = safeParams.toString();
   console.log(`${new Date().toISOString()} ${req.method} ${url.pathname}${query ? `?${query}` : ""}`);
+}
+
+function logResponse(req, res, url) {
+  res.on("finish", () => {
+    console.log(`${new Date().toISOString()} ${req.method} ${url.pathname} -> ${res.statusCode}`);
+  });
 }
 
 function parseCookies(req) {
