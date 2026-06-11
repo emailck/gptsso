@@ -267,7 +267,7 @@ OAI-REUSE-2026
 The web admin dashboard is:
 
 ```text
-https://auth.oai-gpt.com/admin
+https://auth.oai-gpt.com/coco
 ```
 
 Use the `ADMIN_TOKEN` stored in `/home/ubuntu/gptsso-secrets.txt` to sign in. The dashboard supports creating standard, assigned-user, and reusable invite codes with optional usage limits, exporting CSV, and enabling IP-based registration/login rate limiting.
@@ -276,14 +276,14 @@ List invites and users:
 
 ```bash
 ADMIN_TOKEN=$(grep '^ADMIN_TOKEN=' /opt/gptsso/.env | cut -d= -f2-)
-curl http://127.0.0.1:3001/admin/invites \
+curl http://127.0.0.1:3001/coco/invites \
   -H "Authorization: Bearer ${ADMIN_TOKEN}"
 ```
 
 Create a standard invite:
 
 ```bash
-curl -X POST http://127.0.0.1:3001/admin/invites \
+curl -X POST http://127.0.0.1:3001/coco/invites \
   -H "Authorization: Bearer ${ADMIN_TOKEN}" \
   --data-urlencode "code=OAI-XXXX-YYYY"
 ```
@@ -291,7 +291,7 @@ curl -X POST http://127.0.0.1:3001/admin/invites \
 Create an assigned invite:
 
 ```bash
-curl -X POST http://127.0.0.1:3001/admin/invites \
+curl -X POST http://127.0.0.1:3001/coco/invites \
   -H "Authorization: Bearer ${ADMIN_TOKEN}" \
   --data-urlencode "code=OAI-XXXX-YYYY" \
   --data-urlencode "username=zhangsan"
@@ -300,7 +300,7 @@ curl -X POST http://127.0.0.1:3001/admin/invites \
 Create a reusable invite:
 
 ```bash
-curl -X POST http://127.0.0.1:3001/admin/invites \
+curl -X POST http://127.0.0.1:3001/coco/invites \
   -H "Authorization: Bearer ${ADMIN_TOKEN}" \
   --data-urlencode "code=OAI-REUSE-2026" \
   --data-urlencode "reusable=true"
@@ -309,7 +309,7 @@ curl -X POST http://127.0.0.1:3001/admin/invites \
 Create a reusable invite that can be used by up to 10 different usernames:
 
 ```bash
-curl -X POST http://127.0.0.1:3001/admin/invites \
+curl -X POST http://127.0.0.1:3001/coco/invites \
   -H "Authorization: Bearer ${ADMIN_TOKEN}" \
   --data-urlencode "code=OAI-REUSE-10" \
   --data-urlencode "reusable=true" \

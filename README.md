@@ -62,7 +62,7 @@ The full production OpenAI setup process is documented in [docs/openai-sso-setup
 Web admin dashboard:
 
 ```text
-https://auth.your-domain.com/admin
+https://auth.your-domain.com/coco
 ```
 
 Use `ADMIN_TOKEN` to sign in. The dashboard can list/search invites, create standard invites, create assigned-username invites, create reusable invites with an optional usage limit, and export CSV.
@@ -71,7 +71,7 @@ List invite codes and users:
 
 ```powershell
 Invoke-RestMethod `
-  -Uri "http://localhost:3000/admin/invites" `
+  -Uri "http://localhost:3000/coco/invites" `
   -Headers @{ Authorization = "Bearer dev-admin-token-change-me" }
 ```
 
@@ -79,7 +79,7 @@ Create an invite code:
 
 ```powershell
 Invoke-RestMethod `
-  -Uri "http://localhost:3000/admin/invites" `
+  -Uri "http://localhost:3000/coco/invites" `
   -Method Post `
   -Headers @{ Authorization = "Bearer dev-admin-token-change-me" } `
   -Body @{ code = "TEAM-001" }
@@ -89,7 +89,7 @@ Create a generated invite code:
 
 ```powershell
 Invoke-RestMethod `
-  -Uri "http://localhost:3000/admin/invites" `
+  -Uri "http://localhost:3000/coco/invites" `
   -Method Post `
   -Headers @{ Authorization = "Bearer dev-admin-token-change-me" }
 ```
@@ -98,7 +98,7 @@ Create a reusable invite code that can be used by up to 10 different usernames:
 
 ```powershell
 Invoke-RestMethod `
-  -Uri "http://localhost:3000/admin/invites" `
+  -Uri "http://localhost:3000/coco/invites" `
   -Method Post `
   -Headers @{ Authorization = "Bearer dev-admin-token-change-me" } `
   -Body @{ code = "TEAM-REUSE"; reusable = "true"; max_uses = "10" }
@@ -130,7 +130,7 @@ The OIDC `sub` and email are stable. For username `zhangsan` and `VERIFIED_DOMAI
 - Put the app behind HTTPS.
 - Keep `ALLOWED_REDIRECT_URIS` configured. In production the app refuses to start without it.
 - Keep `ADMIN_TOKEN` long and random. The admin dashboard has login lockout, CSRF protection, no-store caching, and strict security headers, but the token is still the main admin secret.
-- Enable the registration rate limit from `/admin` before sharing reusable invite codes publicly.
+- Enable the registration rate limit from `/coco` before sharing reusable invite codes publicly.
 - Back up `data/`, especially `oidc-private-key.pem`. If the key changes, ChatGPT must refetch JWKS and existing sessions may fail validation.
 - Replace the JSON store with a database before high-volume use or multi-instance deployment.
 - For stronger edge protection, add provider-level firewall/WAF rules in front of the server.

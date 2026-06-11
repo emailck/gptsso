@@ -16,6 +16,7 @@ const clientId = process.env.OIDC_CLIENT_ID || "chatgpt";
 const clientSecret = process.env.OIDC_CLIENT_SECRET || "dev-secret-change-me";
 const allowedRedirectUris = parseCsv(process.env.ALLOWED_REDIRECT_URIS || "");
 const adminToken = process.env.ADMIN_TOKEN || "dev-admin-token-change-me";
+const adminBasePath = "/coco";
 const dataDir = process.env.DATA_DIR || join(rootDir, "data");
 const dataFile = join(dataDir, "store.json");
 const keyFile = join(dataDir, "oidc-private-key.pem");
@@ -60,7 +61,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/admin.css") {
+    if (req.method === "GET" && url.pathname === "/coco.css") {
       await serveStatic(res, "public/admin.css");
       return;
     }
@@ -117,32 +118,32 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/admin") {
+    if (req.method === "GET" && url.pathname === adminBasePath) {
       handleAdminPage(req, res, url);
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/admin/export.csv") {
+    if (req.method === "GET" && url.pathname === `${adminBasePath}/export.csv`) {
       handleAdminExport(req, res, url);
       return;
     }
 
-    if (req.method === "POST" && url.pathname === "/admin/login") {
+    if (req.method === "POST" && url.pathname === `${adminBasePath}/login`) {
       await handleAdminLogin(req, res);
       return;
     }
 
-    if (req.method === "POST" && url.pathname === "/admin/logout") {
+    if (req.method === "POST" && url.pathname === `${adminBasePath}/logout`) {
       await handleAdminLogout(req, res);
       return;
     }
 
-    if (req.method === "POST" && url.pathname === "/admin/settings") {
+    if (req.method === "POST" && url.pathname === `${adminBasePath}/settings`) {
       await handleAdminSettings(req, res);
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/admin/invites") {
+    if (req.method === "GET" && url.pathname === `${adminBasePath}/invites`) {
       if (!requireAdmin(req, res)) return;
       sendJson(res, {
         invites: [...inviteCodes.entries()].map(([code, invite]) => ({ code, ...invite })),
@@ -151,7 +152,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === "POST" && url.pathname === "/admin/invites") {
+    if (req.method === "POST" && url.pathname === `${adminBasePath}/invites`) {
       if (!requireAdmin(req, res)) return;
       await handleCreateInvite(req, res);
       return;
@@ -218,7 +219,7 @@ function applySecurityHeaders(req, res, url) {
   if (issuer.startsWith("https://")) {
     res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
   }
-  if (url.pathname.startsWith("/admin") || url.pathname === "/login") {
+  if (url.pathname.startsWith(adminBasePath) || url.pathname === "/login") {
     res.setHeader("Cache-Control", "no-store");
   }
 }
@@ -455,7 +456,7 @@ async function handleCreateInvite(req, res) {
   inviteCodes.set(code, invite);
   await saveStore();
   if (isBrowserForm(req)) {
-    redirect(res, "/admin");
+    redirect(res, adminBasePath);
     return;
   }
   sendJson(res, invite, 201);
@@ -484,12 +485,12 @@ async function handleAdminLogin(req, res) {
     maxAge: 8 * 3600,
     path: "/"
   });
-  redirect(res, "/admin");
+  redirect(res, adminBasePath);
 }
 
 async function handleAdminLogout(req, res) {
   if (!isAdminSessionValid(req)) {
-    redirect(res, "/admin");
+    redirect(res, adminBasePath);
     return;
   }
 
@@ -500,12 +501,12 @@ async function handleAdminLogout(req, res) {
   }
 
   clearCookie(res, "admin_session");
-  redirect(res, "/admin");
+  redirect(res, adminBasePath);
 }
 
 async function handleAdminSettings(req, res) {
   if (!isAdminSessionValid(req)) {
-    redirect(res, "/admin");
+    redirect(res, adminBasePath);
     return;
   }
 
@@ -519,7 +520,7 @@ async function handleAdminSettings(req, res) {
   settings.rateLimitMaxAttempts = clampNumber(body.rate_limit_max_attempts, 1, 1000, 5);
   rateLimitBuckets.clear();
   await saveStore();
-  redirect(res, "/admin");
+  redirect(res, adminBasePath);
 }
 
 function checkRateLimit(req) {
@@ -587,7 +588,7 @@ function handleAdminPage(req, res, url) {
 
 function handleAdminExport(req, res, url) {
   if (!isAdminSessionValid(req)) {
-    redirect(res, "/admin");
+    redirect(res, adminBasePath);
     return;
   }
 
@@ -1117,7 +1118,7 @@ function renderAdminLoginPage(error) {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>GPTSSO 管理后台</title>
-  <link rel="stylesheet" href="/admin.css" />
+  <link rel="stylesheet" href="/coco.css" />
 </head>
 <body class="admin-body">
   <main class="admin-login">
@@ -1126,7 +1127,7 @@ function renderAdminLoginPage(error) {
       <h1>管理后台</h1>
       <p class="admin-muted">输入服务器上的 Admin Token 继续。</p>
       ${error ? `<div class="admin-alert">${escapeHtml(error)}</div>` : ""}
-      <form method="post" action="/admin/login">
+      <form method="post" action="${adminBasePath}/login">
         <label for="admin_token">Admin Token</label>
         <input id="admin_token" name="admin_token" type="password" autocomplete="current-password" required />
         <button type="submit">登录</button>
@@ -1149,7 +1150,7 @@ function renderAdminDashboard({ query, csrfToken }) {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>GPTSSO 管理后台</title>
-  <link rel="stylesheet" href="/admin.css" />
+  <link rel="stylesheet" href="/coco.css" />
 </head>
 <body class="admin-body">
   <header class="admin-topbar">
@@ -1157,7 +1158,7 @@ function renderAdminDashboard({ query, csrfToken }) {
       <p class="admin-eyebrow">GPTSSO</p>
       <h1>邀请码管理</h1>
     </div>
-    <form method="post" action="/admin/logout">
+    <form method="post" action="${adminBasePath}/logout">
       <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}" />
       <button class="secondary" type="submit">退出</button>
     </form>
@@ -1172,7 +1173,7 @@ function renderAdminDashboard({ query, csrfToken }) {
     </section>
 
     <section class="admin-grid">
-      <form class="admin-card" method="post" action="/admin/invites">
+      <form class="admin-card" method="post" action="${adminBasePath}/invites">
         <h2>创建邀请码</h2>
         <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}" />
         <label for="code">邀请码</label>
@@ -1195,7 +1196,7 @@ function renderAdminDashboard({ query, csrfToken }) {
         <button type="submit">创建</button>
       </form>
 
-      <form class="admin-card" method="post" action="/admin/settings">
+      <form class="admin-card" method="post" action="${adminBasePath}/settings">
         <h2>注册限速</h2>
         <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}" />
         <label class="check-row">
@@ -1223,11 +1224,11 @@ function renderAdminDashboard({ query, csrfToken }) {
 
     <section class="admin-card table-card">
       <div class="table-actions">
-        <form method="get" action="/admin">
+        <form method="get" action="${adminBasePath}">
           <input name="q" value="${escapeHtml(query)}" placeholder="搜索邀请码、用户名、邮箱" />
           <button class="secondary" type="submit">搜索</button>
         </form>
-        <a class="download" href="/admin/export.csv${query ? `?q=${encodeURIComponent(query)}` : ""}">导出 CSV</a>
+        <a class="download" href="${adminBasePath}/export.csv${query ? `?q=${encodeURIComponent(query)}` : ""}">导出 CSV</a>
       </div>
 
       <div class="table-wrap">
