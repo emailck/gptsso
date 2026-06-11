@@ -96,8 +96,15 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && url.pathname === "/login") {
-      const authRequest = readAuthRequest(req);
-      sendHtml(res, renderLoginPage({ error: null, username: "", hasRequest: Boolean(authRequest), csrfToken: authRequest ? loginCsrfToken(authRequest) : "" }));
+      const authToken = authRequestTokenFromUrlOrCookie(req, url);
+      const authRequest = readAuthRequestToken(authToken);
+      sendHtml(res, renderLoginPage({
+        error: null,
+        username: "",
+        hasRequest: Boolean(authRequest),
+        csrfToken: authRequest ? loginCsrfToken(authRequest) : "",
+        authRequestToken: authRequest ? authToken : ""
+      }));
       return;
     }
 
@@ -258,18 +265,20 @@ function handleAuthorize(req, res, url) {
     exp: Math.floor(Date.now() / 1000) + 10 * 60
   };
 
-  setCookie(res, "auth_request", signAuthRequest(authRequest), {
+  const authToken = signAuthRequest(authRequest);
+  setCookie(res, "auth_request", authToken, {
     httpOnly: true,
     sameSite: "Lax",
     secure: issuer.startsWith("https://"),
     maxAge: 10 * 60
   });
-  redirect(res, "/login");
+  redirect(res, `/login?t=${encodeURIComponent(authToken)}`);
 }
 
 async function handleLogin(req, res) {
-  const authRequest = readAuthRequest(req);
   const body = await readFormBody(req);
+  const authToken = String(body.auth_request_token || "");
+  const authRequest = readAuthRequestToken(authToken) || readAuthRequest(req);
   const username = normalizeUsername(body.username);
   const inviteCode = normalizeInviteCode(body.invite_code);
   const limit = checkRateLimit(req);
@@ -296,7 +305,8 @@ async function handleLogin(req, res) {
         error: "登录表单已过期，请从 ChatGPT 重新发起 SSO。",
         username,
         hasRequest: true,
-        csrfToken: loginCsrfToken(authRequest)
+        csrfToken: loginCsrfToken(authRequest),
+        authRequestToken: authToken
       }),
       403
     );
@@ -310,7 +320,8 @@ async function handleLogin(req, res) {
         error: `请求太频繁，请 ${limit.retryAfterSeconds} 秒后再试。`,
         username,
         hasRequest: true,
-        csrfToken: loginCsrfToken(authRequest)
+        csrfToken: loginCsrfToken(authRequest),
+        authRequestToken: authToken
       }),
       429
     );
@@ -320,7 +331,7 @@ async function handleLogin(req, res) {
   const result = await bindUserToInvite(username, inviteCode);
   if (result.error) {
     logLoginEvent(req, "invite_error", { username, reason: result.error });
-    sendHtml(res, renderLoginPage({ error: result.error, username, hasRequest: true, csrfToken: loginCsrfToken(authRequest) }), 400);
+    sendHtml(res, renderLoginPage({ error: result.error, username, hasRequest: true, csrfToken: loginCsrfToken(authRequest), authRequestToken: authToken }), 400);
     return;
   }
   logLoginEvent(req, "success", { username, userId: result.user.id });
@@ -1041,7 +1052,10 @@ function signAuthRequest(authRequest) {
 }
 
 function readAuthRequest(req) {
-  const token = parseCookies(req).auth_request || "";
+  return readAuthRequestToken(parseCookies(req).auth_request || "");
+}
+
+function readAuthRequestToken(token) {
   const [payload, signature] = token.split(".");
   if (!payload || !signature) return null;
   const expected = crypto.createHmac("sha256", clientSecret).update(payload).digest("base64url");
@@ -1055,6 +1069,10 @@ function readAuthRequest(req) {
   } catch {
     return null;
   }
+}
+
+function authRequestTokenFromUrlOrCookie(req, url) {
+  return url.searchParams.get("t") || parseCookies(req).auth_request || "";
 }
 
 function loginCsrfToken(authRequest) {
@@ -1165,7 +1183,7 @@ async function serveStatic(res, relativePath) {
   res.end(content);
 }
 
-function renderLoginPage({ error, username, hasRequest, csrfToken }) {
+function renderLoginPage({ error, username, hasRequest, csrfToken, authRequestToken = "" }) {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1192,6 +1210,7 @@ function renderLoginPage({ error, username, hasRequest, csrfToken }) {
       ${!hasRequest ? `<div class="alert muted" role="status">请从 ChatGPT SSO 登录流程进入此页面。</div>` : ""}
 
       <form method="post" action="/login" autocomplete="off" novalidate>
+        <input type="hidden" name="auth_request_token" value="${escapeHtml(authRequestToken)}" />
         <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken || "")}" />
         <label for="username">用户名</label>
         <input id="username" name="username" value="${escapeHtml(username)}" placeholder="zhangsan 或 zhangsan@${escapeHtml(verifiedDomain)}" required minlength="3" maxlength="80" />
