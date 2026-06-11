@@ -285,6 +285,7 @@ function handleUserinfo(req, res) {
 async function handleCreateInvite(req, res) {
   const body = await readFormBody(req);
   const code = normalizeInviteCode(body.code || generateInviteCode());
+  const assignedUsername = body.username ? normalizeUsername(body.username) : null;
   const expiresAt = body.expires_at ? new Date(body.expires_at).toISOString() : null;
 
   if (!/^[A-Z0-9-]{6,64}$/.test(code)) {
@@ -299,10 +300,15 @@ async function handleCreateInvite(req, res) {
     sendJson(res, { error: "expires_at must be a valid date" }, 400);
     return;
   }
+  if (assignedUsername && !isValidUsername(assignedUsername)) {
+    sendJson(res, { error: "username must be 3-40 chars: letters, numbers, dot, underscore, or hyphen" }, 400);
+    return;
+  }
 
   const invite = {
     code,
     status: "available",
+    assignedUsername,
     boundUserId: null,
     expiresAt,
     usedAt: null,
@@ -346,7 +352,7 @@ function verifyPkce(codeRecord, codeVerifier) {
 }
 
 async function bindUserToInvite(username, inviteCode) {
-  if (!/^[a-zA-Z0-9._-]{3,40}$/.test(username)) {
+  if (!isValidUsername(username)) {
     return { error: "用户名只能包含字母、数字、点、下划线和短横线，长度 3-40 位。" };
   }
 
@@ -356,6 +362,9 @@ async function bindUserToInvite(username, inviteCode) {
   }
   if (invite.expiresAt && invite.expiresAt < Date.now()) {
     return { error: "邀请码已过期。" };
+  }
+  if (invite.assignedUsername && invite.assignedUsername !== username) {
+    return { error: "这个邀请码不属于该用户名。" };
   }
 
   const userId = stableUserId(username);
@@ -402,6 +411,10 @@ function userClaims(user) {
 
 function stableUserId(username) {
   return `user_${crypto.createHash("sha256").update(username.toLowerCase()).digest("hex").slice(0, 24)}`;
+}
+
+function isValidUsername(username) {
+  return /^[a-zA-Z0-9._-]{3,40}$/.test(username);
 }
 
 function normalizeUsername(value) {
