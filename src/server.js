@@ -32,6 +32,7 @@ const users = new Map(store.users.map((user) => [user.id, user]));
 const inviteCodes = new Map(store.invites.map((invite) => [invite.code, invite]));
 const authRequests = new Map();
 const authorizationCodes = new Map();
+const accessTokens = new Map();
 
 const server = http.createServer(async (req, res) => {
   try {
@@ -53,8 +54,11 @@ const server = http.createServer(async (req, res) => {
         issuer,
         authorization_endpoint: `${issuer}/authorize`,
         token_endpoint: `${issuer}/token`,
+        userinfo_endpoint: `${issuer}/userinfo`,
         jwks_uri: `${issuer}/.well-known/jwks.json`,
         response_types_supported: ["code"],
+        response_modes_supported: ["query"],
+        grant_types_supported: ["authorization_code"],
         subject_types_supported: ["public"],
         id_token_signing_alg_values_supported: ["RS256"],
         scopes_supported: ["openid", "email", "profile"],
@@ -88,6 +92,11 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/token") {
       await handleToken(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/userinfo") {
+      handleUserinfo(req, res);
       return;
     }
 
@@ -218,6 +227,11 @@ async function handleToken(req, res) {
 
   authorizationCodes.delete(body.code);
   const user = users.get(codeRecord.userId);
+  const accessToken = crypto.randomBytes(32).toString("base64url");
+  accessTokens.set(accessToken, {
+    userId: user.id,
+    expiresAt: Date.now() + 3600 * 1000
+  });
   const now = Math.floor(Date.now() / 1000);
   const idToken = signJwt(
     {
@@ -238,11 +252,24 @@ async function handleToken(req, res) {
   );
 
   sendJson(res, {
-    access_token: crypto.randomBytes(32).toString("base64url"),
+    access_token: accessToken,
     token_type: "Bearer",
     expires_in: 3600,
     id_token: idToken
   });
+}
+
+function handleUserinfo(req, res) {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  const record = accessTokens.get(token);
+  if (!record || record.expiresAt < Date.now()) {
+    sendJson(res, { error: "invalid_token" }, 401);
+    return;
+  }
+
+  const user = users.get(record.userId);
+  sendJson(res, userClaims(user));
 }
 
 async function handleCreateInvite(req, res) {
@@ -336,6 +363,18 @@ async function bindUserToInvite(username, inviteCode) {
   invite.usedAt = new Date().toISOString();
   await saveStore();
   return { user };
+}
+
+function userClaims(user) {
+  return {
+    sub: user.oidcSub,
+    email: user.email,
+    email_verified: true,
+    given_name: user.givenName || user.username,
+    family_name: user.familyName || "User",
+    name: user.username,
+    preferred_username: user.username
+  };
 }
 
 function stableUserId(username) {
