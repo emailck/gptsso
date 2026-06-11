@@ -59,7 +59,7 @@ const server = http.createServer(async (req, res) => {
         id_token_signing_alg_values_supported: ["RS256"],
         scopes_supported: ["openid", "email", "profile"],
         token_endpoint_auth_methods_supported: ["client_secret_post", "client_secret_basic"],
-        claims_supported: ["sub", "email", "email_verified", "name", "preferred_username"]
+        claims_supported: ["sub", "email", "email_verified", "given_name", "family_name", "name", "preferred_username"]
       });
       return;
     }
