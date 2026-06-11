@@ -312,6 +312,7 @@ HTTPS through Caddy
 Strict security headers and CSP
 No-store caching on login/admin pages
 Signed HttpOnly admin session cookie
+CSRF checks for the IdP login form
 CSRF checks for browser admin POST actions
 Admin login failure lockout by IP
 32 KB request body limit

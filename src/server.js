@@ -630,7 +630,7 @@ async function bindUserToInvite(username, inviteCode) {
   if (!invite) {
     return { error: "邀请码不存在。" };
   }
-  if (invite.expiresAt && invite.expiresAt < Date.now()) {
+  if (invite.expiresAt && Date.parse(invite.expiresAt) < Date.now()) {
     return { error: "邀请码已过期。" };
   }
   if (invite.assignedUsername && invite.assignedUsername !== username) {
