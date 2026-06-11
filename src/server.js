@@ -36,7 +36,6 @@ const settings = {
 };
 const users = new Map(store.users.map((user) => [user.id, user]));
 const inviteCodes = new Map(store.invites.map((invite) => [invite.code, invite]));
-const authRequests = new Map();
 const authorizationCodes = new Map();
 const accessTokens = new Map();
 const rateLimitBuckets = new Map();
@@ -97,9 +96,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "GET" && url.pathname === "/login") {
-      const requestId = parseCookies(req).auth_request;
-      const hasRequest = requestId && authRequests.has(requestId);
-      sendHtml(res, renderLoginPage({ error: null, username: "", hasRequest, csrfToken: hasRequest ? loginCsrfToken(requestId) : "" }));
+      const authRequest = readAuthRequest(req);
+      sendHtml(res, renderLoginPage({ error: null, username: "", hasRequest: Boolean(authRequest), csrfToken: authRequest ? loginCsrfToken(authRequest) : "" }));
       return;
     }
 
@@ -243,18 +241,19 @@ function handleAuthorize(req, res, url) {
     return;
   }
 
-  const requestId = crypto.randomUUID();
-  authRequests.set(requestId, {
+  const authRequest = {
+    id: crypto.randomUUID(),
     clientId: query.client_id,
     redirectUri: query.redirect_uri,
     scope: query.scope || "openid email profile",
     state: query.state,
     nonce: query.nonce,
     codeChallenge: query.code_challenge,
-    codeChallengeMethod: query.code_challenge_method || "plain"
-  });
+    codeChallengeMethod: query.code_challenge_method || "plain",
+    exp: Math.floor(Date.now() / 1000) + 10 * 60
+  };
 
-  setCookie(res, "auth_request", requestId, {
+  setCookie(res, "auth_request", signAuthRequest(authRequest), {
     httpOnly: true,
     sameSite: "Lax",
     secure: issuer.startsWith("https://"),
@@ -264,8 +263,7 @@ function handleAuthorize(req, res, url) {
 }
 
 async function handleLogin(req, res) {
-  const requestId = parseCookies(req).auth_request;
-  const authRequest = authRequests.get(requestId);
+  const authRequest = readAuthRequest(req);
   const body = await readFormBody(req);
   const username = normalizeUsername(body.username);
   const inviteCode = normalizeInviteCode(body.invite_code);
@@ -285,7 +283,7 @@ async function handleLogin(req, res) {
     );
     return;
   }
-  if (!verifyLoginCsrf(requestId, body)) {
+  if (!verifyLoginCsrf(authRequest, body)) {
     logLoginEvent(req, "csrf_invalid", { username });
     sendHtml(
       res,
@@ -293,7 +291,7 @@ async function handleLogin(req, res) {
         error: "登录表单已过期，请从 ChatGPT 重新发起 SSO。",
         username,
         hasRequest: true,
-        csrfToken: loginCsrfToken(requestId)
+        csrfToken: loginCsrfToken(authRequest)
       }),
       403
     );
@@ -307,7 +305,7 @@ async function handleLogin(req, res) {
         error: `请求太频繁，请 ${limit.retryAfterSeconds} 秒后再试。`,
         username,
         hasRequest: true,
-        csrfToken: loginCsrfToken(requestId)
+        csrfToken: loginCsrfToken(authRequest)
       }),
       429
     );
@@ -317,7 +315,7 @@ async function handleLogin(req, res) {
   const result = await bindUserToInvite(username, inviteCode);
   if (result.error) {
     logLoginEvent(req, "invite_error", { username, reason: result.error });
-    sendHtml(res, renderLoginPage({ error: result.error, username, hasRequest: true, csrfToken: loginCsrfToken(requestId) }), 400);
+    sendHtml(res, renderLoginPage({ error: result.error, username, hasRequest: true, csrfToken: loginCsrfToken(authRequest) }), 400);
     return;
   }
   logLoginEvent(req, "success", { username, userId: result.user.id });
@@ -333,7 +331,6 @@ async function handleLogin(req, res) {
     codeChallengeMethod: authRequest.codeChallengeMethod,
     expiresAt: Date.now() + 5 * 60 * 1000
   });
-  authRequests.delete(requestId);
   clearCookie(res, "auth_request");
 
   const redirectUrl = new URL(authRequest.redirectUri);
@@ -983,12 +980,35 @@ function verifyAdminCsrf(req, body) {
   return constantTimeEqual(String(body.csrf_token || ""), adminCsrfToken(req));
 }
 
-function loginCsrfToken(requestId) {
-  return crypto.createHmac("sha256", clientSecret).update(`login-csrf:${requestId}`).digest("base64url");
+function signAuthRequest(authRequest) {
+  const payload = Buffer.from(JSON.stringify(authRequest)).toString("base64url");
+  const signature = crypto.createHmac("sha256", clientSecret).update(payload).digest("base64url");
+  return `${payload}.${signature}`;
 }
 
-function verifyLoginCsrf(requestId, body) {
-  return constantTimeEqual(String(body.csrf_token || ""), loginCsrfToken(requestId));
+function readAuthRequest(req) {
+  const token = parseCookies(req).auth_request || "";
+  const [payload, signature] = token.split(".");
+  if (!payload || !signature) return null;
+  const expected = crypto.createHmac("sha256", clientSecret).update(payload).digest("base64url");
+  if (!constantTimeEqual(signature, expected)) return null;
+  try {
+    const authRequest = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (Number(authRequest.exp || 0) <= Math.floor(Date.now() / 1000)) return null;
+    if (authRequest.clientId !== clientId) return null;
+    if (!authRequest.redirectUri) return null;
+    return authRequest;
+  } catch {
+    return null;
+  }
+}
+
+function loginCsrfToken(authRequest) {
+  return crypto.createHmac("sha256", clientSecret).update(`login-csrf:${authRequest.id}`).digest("base64url");
+}
+
+function verifyLoginCsrf(authRequest, body) {
+  return constantTimeEqual(String(body.csrf_token || ""), loginCsrfToken(authRequest));
 }
 
 function normalizeAdminSearch(value) {
