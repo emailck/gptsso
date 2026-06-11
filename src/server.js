@@ -197,11 +197,12 @@ function assertProductionSecrets() {
 }
 
 function applySecurityHeaders(req, res, url) {
+  const formActionSources = ["'self'", ...allowedRedirectOrigins()].join(" ");
   const csp = [
     "default-src 'self'",
     "base-uri 'none'",
     "connect-src 'self'",
-    "form-action 'self'",
+    `form-action ${formActionSources}`,
     "frame-ancestors 'none'",
     "img-src 'self' data:",
     "object-src 'none'",
@@ -222,6 +223,16 @@ function applySecurityHeaders(req, res, url) {
   if (url.pathname.startsWith(adminBasePath) || url.pathname === "/login") {
     res.setHeader("Cache-Control", "no-store");
   }
+}
+
+function allowedRedirectOrigins() {
+  return [...new Set(allowedRedirectUris.map((uri) => {
+    try {
+      return new URL(uri).origin;
+    } catch {
+      return null;
+    }
+  }).filter(Boolean))];
 }
 
 function handleAuthorize(req, res, url) {
