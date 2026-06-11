@@ -50,6 +50,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/admin.css") {
+      await serveStatic(res, "public/admin.css");
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/.well-known/openid-configuration") {
       sendJson(res, {
         issuer,
@@ -99,6 +104,22 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/userinfo") {
       handleUserinfo(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/admin") {
+      handleAdminPage(req, res, url);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/admin/login") {
+      await handleAdminLogin(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/admin/logout") {
+      clearCookie(res, "admin_session");
+      redirect(res, "/admin");
       return;
     }
 
@@ -319,7 +340,38 @@ async function handleCreateInvite(req, res) {
   };
   inviteCodes.set(code, invite);
   await saveStore();
+  if (isBrowserForm(req)) {
+    redirect(res, "/admin");
+    return;
+  }
   sendJson(res, invite, 201);
+}
+
+async function handleAdminLogin(req, res) {
+  const body = await readFormBody(req);
+  if (!constantTimeEqual(String(body.admin_token || ""), adminToken)) {
+    sendHtml(res, renderAdminLoginPage("Admin token 不正确。"), 401);
+    return;
+  }
+
+  setCookie(res, "admin_session", signAdminSession(), {
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: issuer.startsWith("https://"),
+    maxAge: 8 * 3600,
+    path: "/"
+  });
+  redirect(res, "/admin");
+}
+
+function handleAdminPage(req, res, url) {
+  if (!isAdminSessionValid(req)) {
+    sendHtml(res, renderAdminLoginPage(null));
+    return;
+  }
+
+  const query = normalizeAdminSearch(url.searchParams.get("q"));
+  sendHtml(res, renderAdminDashboard({ query }));
 }
 
 function validateAuthorizeRequest(query) {
@@ -448,10 +500,15 @@ function parseClientAuth(req, body) {
   };
 }
 
+function isBrowserForm(req) {
+  const accept = req.headers.accept || "";
+  return accept.includes("text/html");
+}
+
 function requireAdmin(req, res) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-  if (!constantTimeEqual(token, adminToken)) {
+  if (!constantTimeEqual(token, adminToken) && !isAdminSessionValid(req)) {
     sendJson(res, { error: "unauthorized" }, 401);
     return false;
   }
@@ -577,6 +634,56 @@ function parseBoolean(value) {
   return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
 }
 
+function signAdminSession() {
+  const payload = Buffer.from(JSON.stringify({
+    exp: Math.floor(Date.now() / 1000) + 8 * 3600,
+    nonce: crypto.randomBytes(12).toString("base64url")
+  })).toString("base64url");
+  const signature = crypto.createHmac("sha256", adminToken).update(payload).digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function isAdminSessionValid(req) {
+  const session = parseCookies(req).admin_session || "";
+  const [payload, signature] = session.split(".");
+  if (!payload || !signature) return false;
+  const expected = crypto.createHmac("sha256", adminToken).update(payload).digest("base64url");
+  if (!constantTimeEqual(signature, expected)) return false;
+  try {
+    const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return Number(data.exp || 0) > Math.floor(Date.now() / 1000);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeAdminSearch(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function adminRows(query) {
+  return [...inviteCodes.values()]
+    .map((invite) => {
+      const user = invite.boundUserId ? users.get(invite.boundUserId) : null;
+      return {
+        code: invite.code,
+        status: invite.status || "available",
+        reusable: Boolean(invite.reusable),
+        assignedUsername: invite.assignedUsername || "",
+        usedCount: Number(invite.usedCount || 0),
+        boundUsername: user?.username || "",
+        email: user?.email || "",
+        usedAt: invite.usedAt || "",
+        createdAt: invite.createdAt || ""
+      };
+    })
+    .filter((row) => {
+      if (!query) return true;
+      return Object.values(row).some((value) => String(value).toLowerCase().includes(query));
+    })
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+}
+
 function logRequest(req, url) {
   const safeParams = new URLSearchParams(url.searchParams);
   if (safeParams.has("client_secret")) safeParams.set("client_secret", "[redacted]");
@@ -611,6 +718,7 @@ function setCookie(res, name, value, options = {}) {
   if (options.sameSite) parts.push(`SameSite=${options.sameSite}`);
   if (options.secure) parts.push("Secure");
   if (options.maxAge) parts.push(`Max-Age=${options.maxAge}`);
+  if (options.path) parts.push(`Path=${options.path}`);
   res.setHeader("Set-Cookie", parts.join("; "));
 }
 
@@ -685,6 +793,163 @@ function renderLoginPage({ error, username, hasRequest }) {
   </main>
 </body>
 </html>`;
+}
+
+function renderAdminLoginPage(error) {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GPTSSO 管理后台</title>
+  <link rel="stylesheet" href="/admin.css" />
+</head>
+<body class="admin-body">
+  <main class="admin-login">
+    <section class="admin-login-panel">
+      <p class="admin-eyebrow">GPTSSO</p>
+      <h1>管理后台</h1>
+      <p class="admin-muted">输入服务器上的 Admin Token 继续。</p>
+      ${error ? `<div class="admin-alert">${escapeHtml(error)}</div>` : ""}
+      <form method="post" action="/admin/login">
+        <label for="admin_token">Admin Token</label>
+        <input id="admin_token" name="admin_token" type="password" autocomplete="current-password" required />
+        <button type="submit">登录</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
+function renderAdminDashboard({ query }) {
+  const rows = adminRows(query);
+  const allRows = adminRows("");
+  const boundCount = allRows.filter((row) => row.boundUsername).length;
+  const reusableCount = allRows.filter((row) => row.reusable).length;
+  const csv = toCsv(rows);
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GPTSSO 管理后台</title>
+  <link rel="stylesheet" href="/admin.css" />
+</head>
+<body class="admin-body">
+  <header class="admin-topbar">
+    <div>
+      <p class="admin-eyebrow">GPTSSO</p>
+      <h1>邀请码管理</h1>
+    </div>
+    <form method="post" action="/admin/logout">
+      <button class="secondary" type="submit">退出</button>
+    </form>
+  </header>
+
+  <main class="admin-main">
+    <section class="metrics" aria-label="统计">
+      <div><span>${allRows.length}</span><p>邀请码</p></div>
+      <div><span>${boundCount}</span><p>已绑定用户</p></div>
+      <div><span>${reusableCount}</span><p>可重复邀请码</p></div>
+      <div><span>${users.size}</span><p>用户</p></div>
+    </section>
+
+    <section class="admin-grid">
+      <form class="admin-card" method="post" action="/admin/invites">
+        <h2>创建邀请码</h2>
+        <label for="code">邀请码</label>
+        <input id="code" name="code" placeholder="留空自动生成" />
+
+        <label for="username">指定用户名</label>
+        <input id="username" name="username" placeholder="可选，例如 zhangsan" />
+
+        <label for="expires_at">过期时间</label>
+        <input id="expires_at" name="expires_at" placeholder="可选，例如 2026-12-31T00:00:00Z" />
+
+        <label class="check-row">
+          <input type="checkbox" name="reusable" value="true" />
+          <span>可重复使用</span>
+        </label>
+
+        <button type="submit">创建</button>
+      </form>
+
+      <section class="admin-card">
+        <h2>使用说明</h2>
+        <p>普通邀请码第一次使用后会绑定用户名。指定用户名的邀请码只能给该用户名使用。可重复邀请码允许多个不同用户名使用。</p>
+        <p>用户在 IdP 登录页只填用户名，不填完整邮箱；系统会自动生成 <code>用户名@${escapeHtml(verifiedDomain)}</code>。</p>
+      </section>
+    </section>
+
+    <section class="admin-card table-card">
+      <div class="table-actions">
+        <form method="get" action="/admin">
+          <input name="q" value="${escapeHtml(query)}" placeholder="搜索邀请码、用户名、邮箱" />
+          <button class="secondary" type="submit">搜索</button>
+        </form>
+        <a class="download" href="data:text/csv;charset=utf-8,${encodeURIComponent(csv)}" download="gptsso-invites.csv">导出 CSV</a>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>邀请码</th>
+              <th>类型</th>
+              <th>状态</th>
+              <th>指定用户名</th>
+              <th>绑定用户名</th>
+              <th>邮箱</th>
+              <th>使用次数</th>
+              <th>创建时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(renderAdminRow).join("") || `<tr><td colspan="8" class="empty">没有匹配结果</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
+function renderAdminRow(row) {
+  const type = row.reusable ? "可重复" : row.assignedUsername ? "指定用户" : "普通";
+  return `<tr>
+    <td><code>${escapeHtml(row.code)}</code></td>
+    <td>${escapeHtml(type)}</td>
+    <td><span class="status ${row.boundUsername ? "bound" : "available"}">${row.boundUsername ? "已绑定" : "可用"}</span></td>
+    <td>${escapeHtml(row.assignedUsername || "-")}</td>
+    <td>${escapeHtml(row.boundUsername || "-")}</td>
+    <td>${escapeHtml(row.email || "-")}</td>
+    <td>${escapeHtml(String(row.usedCount))}</td>
+    <td>${escapeHtml(row.createdAt || "-")}</td>
+  </tr>`;
+}
+
+function toCsv(rows) {
+  const header = ["code", "type", "status", "assignedUsername", "boundUsername", "email", "usedCount", "createdAt", "usedAt"];
+  const lines = rows.map((row) => [
+    row.code,
+    row.reusable ? "reusable" : row.assignedUsername ? "assigned" : "standard",
+    row.status,
+    row.assignedUsername,
+    row.boundUsername,
+    row.email,
+    row.usedCount,
+    row.createdAt,
+    row.usedAt
+  ].map(csvCell).join(","));
+  return [header.join(","), ...lines].join("\n");
+}
+
+function csvCell(value) {
+  const text = String(value ?? "");
+  return `"${text.replaceAll('"', '""')}"`;
 }
 
 function escapeHtml(value) {

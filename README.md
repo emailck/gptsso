@@ -57,6 +57,14 @@ The full production OpenAI setup process is documented in [docs/openai-sso-setup
 
 ## Admin API
 
+Web admin dashboard:
+
+```text
+https://auth.your-domain.com/admin
+```
+
+Use `ADMIN_TOKEN` to sign in. The dashboard can list/search invites, create standard invites, create assigned-username invites, create reusable invites, and export CSV.
+
 List invite codes and users:
 
 ```powershell
