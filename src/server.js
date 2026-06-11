@@ -114,9 +114,8 @@ const server = http.createServer(async (req, res) => {
 server.listen(port, () => {
   console.log(`OIDC IdP running at ${issuer}`);
   console.log(`Client ID: ${clientId}`);
-  console.log(`Client Secret: ${clientSecret}`);
   console.log(`Discovery URL: ${issuer}/.well-known/openid-configuration`);
-  console.log(`Admin token: ${adminToken}`);
+  console.log("Client secret and admin token loaded from environment");
 });
 
 function handleAuthorize(req, res, url) {
