@@ -65,7 +65,7 @@ Web admin dashboard:
 https://auth.your-domain.com/coco
 ```
 
-Use `ADMIN_TOKEN` to sign in. The dashboard can list/search invites, create standard invites, create assigned-username invites, create reusable invites with an optional usage limit, and export CSV.
+Use `ADMIN_TOKEN` to sign in. The dashboard can list/search invites, create standard invites, create assigned-username invites, create reusable invites with an optional usage limit, delete invites, and export CSV.
 
 List invite codes and users:
 
@@ -94,6 +94,8 @@ Invoke-RestMethod `
   -Headers @{ Authorization = "Bearer dev-admin-token-change-me" }
 ```
 
+Generated codes use a random four-part format such as `K7QD-9MWH-P3TX-AB52`.
+
 Create a reusable invite code that can be used by up to 10 different usernames:
 
 ```powershell
@@ -102,6 +104,16 @@ Invoke-RestMethod `
   -Method Post `
   -Headers @{ Authorization = "Bearer dev-admin-token-change-me" } `
   -Body @{ code = "TEAM-REUSE"; reusable = "true"; max_uses = "10" }
+```
+
+Delete an invite code:
+
+```powershell
+Invoke-RestMethod `
+  -Uri "http://localhost:3000/coco/delete-invite" `
+  -Method Post `
+  -Headers @{ Authorization = "Bearer dev-admin-token-change-me" } `
+  -Body @{ code = "TEAM-REUSE" }
 ```
 
 ## Login behavior

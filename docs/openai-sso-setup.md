@@ -270,7 +270,7 @@ The web admin dashboard is:
 https://auth.oai-gpt.com/coco
 ```
 
-Use the `ADMIN_TOKEN` stored in `/home/ubuntu/gptsso-secrets.txt` to sign in. The dashboard supports creating standard, assigned-user, and reusable invite codes with optional usage limits, exporting CSV, and enabling IP-based registration/login rate limiting.
+Use the `ADMIN_TOKEN` stored in `/home/ubuntu/gptsso-secrets.txt` to sign in. The dashboard supports creating standard, assigned-user, and reusable invite codes with optional usage limits, deleting invites, exporting CSV, and enabling IP-based registration/login rate limiting.
 
 List invites and users:
 
@@ -314,6 +314,20 @@ curl -X POST http://127.0.0.1:3001/coco/invites \
   --data-urlencode "code=OAI-REUSE-10" \
   --data-urlencode "reusable=true" \
   --data-urlencode "max_uses=10"
+```
+
+Generated invite codes use a random four-part format such as:
+
+```text
+K7QD-9MWH-P3TX-AB52
+```
+
+Delete an invite:
+
+```bash
+curl -X POST http://127.0.0.1:3001/coco/delete-invite \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  --data-urlencode "code=OAI-REUSE-10"
 ```
 
 ## Security Hardening

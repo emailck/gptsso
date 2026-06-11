@@ -141,6 +141,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === `${adminBasePath}/delete-invite`) {
+      await handleDeleteInvite(req, res);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === `${adminBasePath}/invites`) {
       if (!requireAdmin(req, res)) return;
       sendJson(res, {
@@ -422,7 +427,7 @@ async function handleCreateInvite(req, res) {
     sendText(res, 403, "Invalid CSRF token");
     return;
   }
-  const code = normalizeInviteCode(body.code || generateInviteCode());
+  const code = normalizeInviteCode(body.code || generateUniqueInviteCode());
   const assignedUsername = body.username ? normalizeUsername(body.username) : null;
   const reusable = parseBoolean(body.reusable);
   const maxUses = parseOptionalPositiveInteger(body.max_uses, 100000);
@@ -533,6 +538,35 @@ async function handleAdminSettings(req, res) {
   settings.rateLimitMaxAttempts = clampNumber(body.rate_limit_max_attempts, 1, 1000, 5);
   rateLimitBuckets.clear();
   await saveStore();
+  redirect(res, adminBasePath);
+}
+
+async function handleDeleteInvite(req, res) {
+  const bearerAdmin = hasValidAdminBearer(req);
+  if (!bearerAdmin && !isAdminSessionValid(req)) {
+    if (isBrowserForm(req)) {
+      redirect(res, adminBasePath);
+      return;
+    }
+    sendJson(res, { error: "unauthorized" }, 401);
+    return;
+  }
+
+  const body = await readFormBody(req);
+  if (!bearerAdmin && !verifyAdminCsrf(req, body)) {
+    sendText(res, 403, "Invalid CSRF token");
+    return;
+  }
+
+  const code = normalizeInviteCode(body.code);
+  if (code) {
+    inviteCodes.delete(code);
+    await saveStore();
+  }
+  if (!isBrowserForm(req)) {
+    sendJson(res, { ok: true, code });
+    return;
+  }
   redirect(res, adminBasePath);
 }
 
@@ -675,7 +709,7 @@ async function bindUserToInvite(username, inviteCode) {
     return { error: "这个邀请码已经绑定了其他用户。" };
   }
   if (invite.reusable && !hasUsedReusableInvite && inviteUsageLimitReached(invite)) {
-    return { error: "这个邀请码的使用次数已经用完。" };
+    return { error: "这个邀请码的使用次数已经用完，请联系管理员更换新的邀请码。" };
   }
   if (existingUser && invite.reusable) {
     if (!hasUsedReusableInvite && Array.isArray(invite.usedUserIds)) {
@@ -720,6 +754,12 @@ function inviteUsedUserIds(invite) {
 function inviteUsageLimitReached(invite) {
   const maxUses = Number(invite.maxUses || 0);
   return maxUses > 0 && Number(invite.usedCount || 0) >= maxUses;
+}
+
+function remainingInviteUses(invite) {
+  const maxUses = Number(invite.maxUses || 0);
+  if (!maxUses) return null;
+  return Math.max(0, maxUses - Number(invite.usedCount || 0));
 }
 
 function markReusableInviteUsed(invite, userId) {
@@ -919,7 +959,21 @@ function makeInvite(code) {
 }
 
 function generateInviteCode() {
-  return `INV-${crypto.randomBytes(6).toString("base64url").toUpperCase()}`;
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.randomBytes(18);
+  let code = "";
+  for (const byte of bytes) {
+    code += alphabet[byte % alphabet.length];
+  }
+  return `${code.slice(0, 4)}-${code.slice(4, 8)}-${code.slice(8, 12)}-${code.slice(12, 16)}`;
+}
+
+function generateUniqueInviteCode() {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const code = generateInviteCode();
+    if (!inviteCodes.has(code)) return code;
+  }
+  throw new Error("Unable to generate unique invite code");
 }
 
 function parseCsv(value) {
@@ -1027,6 +1081,7 @@ function adminRows(query) {
         assignedUsername: invite.assignedUsername || "",
         usedCount: Number(invite.usedCount || 0),
         maxUses: Number(invite.maxUses || 0),
+        remainingUses: remainingInviteUses(invite),
         boundUsername: user?.username || "",
         email: user?.email || "",
         usedAt: invite.usedAt || "",
@@ -1285,10 +1340,11 @@ function renderAdminDashboard({ query, csrfToken }) {
               <th>使用次数</th>
               <th>次数上限</th>
               <th>创建时间</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
-            ${rows.map(renderAdminRow).join("") || `<tr><td colspan="9" class="empty">没有匹配结果</td></tr>`}
+            ${rows.map((row) => renderAdminRow(row, csrfToken)).join("") || `<tr><td colspan="10" class="empty">没有匹配结果</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -1298,7 +1354,7 @@ function renderAdminDashboard({ query, csrfToken }) {
 </html>`;
 }
 
-function renderAdminRow(row) {
+function renderAdminRow(row, csrfToken) {
   const type = row.reusable ? "可重复" : row.assignedUsername ? "指定用户" : "普通";
   const statusText = row.status === "exhausted" ? "已用完" : row.boundUsername ? "已绑定" : "可用";
   const statusClass = row.status === "exhausted" ? "bound" : row.boundUsername ? "bound" : "available";
@@ -1310,13 +1366,20 @@ function renderAdminRow(row) {
     <td>${escapeHtml(row.boundUsername || "-")}</td>
     <td>${escapeHtml(row.email || "-")}</td>
     <td>${escapeHtml(String(row.usedCount))}</td>
-    <td>${escapeHtml(row.maxUses ? String(row.maxUses) : "不限")}</td>
+    <td>${escapeHtml(row.maxUses ? `${row.maxUses}（剩余 ${row.remainingUses}）` : "不限")}</td>
     <td>${escapeHtml(row.createdAt || "-")}</td>
+    <td>
+      <form class="inline-form" method="post" action="${adminBasePath}/delete-invite">
+        <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken)}" />
+        <input type="hidden" name="code" value="${escapeHtml(row.code)}" />
+        <button class="danger-small" type="submit">删除</button>
+      </form>
+    </td>
   </tr>`;
 }
 
 function toCsv(rows) {
-  const header = ["code", "type", "status", "assignedUsername", "boundUsername", "email", "usedCount", "maxUses", "createdAt", "usedAt"];
+  const header = ["code", "type", "status", "assignedUsername", "boundUsername", "email", "usedCount", "maxUses", "remainingUses", "createdAt", "usedAt"];
   const lines = rows.map((row) => [
     row.code,
     row.reusable ? "reusable" : row.assignedUsername ? "assigned" : "standard",
@@ -1326,6 +1389,7 @@ function toCsv(rows) {
     row.email,
     row.usedCount,
     row.maxUses || "",
+    row.remainingUses ?? "",
     row.createdAt,
     row.usedAt
   ].map(csvCell).join(","));

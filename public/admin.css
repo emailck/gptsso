@@ -263,6 +263,24 @@ th {
   background: #fff0d8;
 }
 
+.inline-form {
+  margin: 0;
+}
+
+.danger-small {
+  min-height: 34px;
+  padding: 0 12px;
+  color: #9f1239;
+  background: #fff1f2;
+  border: 1px solid #fecdd3;
+  border-radius: 6px;
+  font-weight: 800;
+}
+
+.danger-small:hover {
+  background: #ffe4e6;
+}
+
 .empty {
   color: var(--muted);
   text-align: center;
