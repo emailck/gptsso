@@ -495,12 +495,9 @@ async function handleToken(req, res) {
       given_name: user.givenName || user.username,
       family_name: user.familyName || "User",
       preferred_username: user.username,
-      idpId: user.oidcSub,
-      firstName: user.givenName || user.username,
-      lastName: user.familyName || "User",
       nonce: codeRecord.nonce
     },
-    { alg: "RS256", typ: "JWT", kid: keyId }
+    { alg: "RS256", kid: keyId }
   );
 
   sendJson(res, {
@@ -885,10 +882,7 @@ function userClaims(user) {
     given_name: user.givenName || user.username,
     family_name: user.familyName || "User",
     name: user.username,
-    preferred_username: user.username,
-    idpId: user.oidcSub,
-    firstName: user.givenName || user.username,
-    lastName: user.familyName || "User"
+    preferred_username: user.username
   };
 }
 
