@@ -28,6 +28,7 @@ Default development values:
 - Discovery URL: `http://localhost:3000/.well-known/openid-configuration`
 - Invite codes: `ALPHA-2026`, `BETA-2026`
 - Email domain: `example.com`
+- Multi-workspace mode: set `OIDC_CLIENTS_JSON` to define multiple ChatGPT clients/domains
 - Admin token: `dev-admin-token-change-me`
 
 ## Environment
@@ -40,9 +41,35 @@ notepad .env
 npm run dev
 ```
 
-`VERIFIED_DOMAIN` must match a domain verified in the ChatGPT admin identity settings.
+`VERIFIED_DOMAIN` must match a domain verified in the ChatGPT admin identity settings. For multiple ChatGPT workspaces/domains, set `OIDC_CLIENTS_JSON`; when present, it overrides the single-client `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `VERIFIED_DOMAIN`, and `ALLOWED_REDIRECT_URIS` values.
 
 Use HTTPS in production. `ISSUER` must be the exact public origin users and ChatGPT can reach. The service writes persistent state to `data/store.json` and the OIDC signing key to `data/oidc-private-key.pem`.
+
+
+## Multiple ChatGPT workspaces / domains
+
+One deployment can serve multiple ChatGPT Business/Team workspaces. Keep the same public issuer, for example:
+
+```text
+https://auth.your-domain.com
+```
+
+Then configure one OIDC client per ChatGPT workspace:
+
+```env
+OIDC_CLIENTS_JSON={"team-a":{"client_secret":"long-random-secret-a","verified_domain":"company-a.com","allowed_redirect_uris":["https://callback-from-openai-for-team-a"]},"team-b":{"client_secret":"long-random-secret-b","verified_domain":"company-b.com","allowed_redirect_uris":["https://callback-from-openai-for-team-b"]}}
+```
+
+For each ChatGPT workspace, use:
+
+- Issuer / discovery URL: `https://auth.your-domain.com/.well-known/openid-configuration`
+- Client ID: the key in `OIDC_CLIENTS_JSON`, such as `team-a` or `team-b`
+- Client secret: that client's `client_secret`
+- Scopes: `openid email profile`
+
+The IdP chooses the email domain by `client_id`. For example, `team-a` returns `username@company-a.com`, while `team-b` returns `username@company-b.com`. Each `verified_domain` must already be verified in that ChatGPT workspace's OpenAI Admin Console.
+
+Users are isolated by client. The same username in two clients gets two different OIDC `sub` values and two different emails.
 
 ## ChatGPT Custom OIDC fields
 
@@ -126,7 +153,7 @@ Rules:
 - Username already bound through another invite: reject.
 - Reusable invite with `max_uses`: each new username consumes one use; the same username signing in again does not consume another use.
 
-The OIDC `sub` and email are stable. For username `zhangsan` and `VERIFIED_DOMAIN=your-domain.com`, the token contains:
+The OIDC `sub` and email are stable. For username `zhangsan` and `VERIFIED_DOMAIN=your-domain.com` in single-client mode, or the matching client's `verified_domain=your-domain.com` in multi-client mode, the token contains:
 
 ```json
 {
@@ -140,7 +167,7 @@ The OIDC `sub` and email are stable. For username `zhangsan` and `VERIFIED_DOMAI
 
 - Change `OIDC_CLIENT_SECRET` and `ADMIN_TOKEN`.
 - Put the app behind HTTPS.
-- Keep `ALLOWED_REDIRECT_URIS` configured. In production the app refuses to start without it.
+- Keep `ALLOWED_REDIRECT_URIS` configured in single-client mode, or `allowed_redirect_uris` configured for every entry in `OIDC_CLIENTS_JSON`. In production the app refuses to start without redirect URIs for every client.
 - Keep `ADMIN_TOKEN` long and random. The admin dashboard has login lockout, CSRF protection, no-store caching, and strict security headers, but the token is still the main admin secret.
 - Enable the registration rate limit from `/coco` before sharing reusable invite codes publicly.
 - Back up `data/`, especially `oidc-private-key.pem`. If the key changes, ChatGPT must refetch JWKS and existing sessions may fail validation.

@@ -11,10 +11,14 @@ await loadEnvFile(join(rootDir, ".env"));
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || "127.0.0.1";
 const issuer = process.env.ISSUER || `http://localhost:${port}`;
-const verifiedDomain = process.env.VERIFIED_DOMAIN || "example.com";
-const clientId = process.env.OIDC_CLIENT_ID || "chatgpt";
-const clientSecret = process.env.OIDC_CLIENT_SECRET || "dev-secret-change-me";
-const allowedRedirectUris = parseCsv(process.env.ALLOWED_REDIRECT_URIS || "");
+const legacyVerifiedDomain = process.env.VERIFIED_DOMAIN || "example.com";
+const legacyClientId = process.env.OIDC_CLIENT_ID || "chatgpt";
+const legacyClientSecret = process.env.OIDC_CLIENT_SECRET || "dev-secret-change-me";
+const legacyAllowedRedirectUris = parseCsv(process.env.ALLOWED_REDIRECT_URIS || "");
+const usingMultiClientConfig = Boolean(String(process.env.OIDC_CLIENTS_JSON || "").trim());
+const clients = loadOidcClients();
+const defaultClient = clients[0];
+const clientsById = new Map(clients.map((client) => [client.clientId, client]));
 const adminToken = process.env.ADMIN_TOKEN || "dev-admin-token-change-me";
 const adminBasePath = "/coco";
 const dataDir = process.env.DATA_DIR || join(rootDir, "data");
@@ -185,24 +189,99 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(port, host, () => {
   console.log(`OIDC IdP running at ${issuer} on ${host}:${port}`);
-  console.log(`Client ID: ${clientId}`);
+  console.log(`Clients: ${clients.map((client) => `${client.clientId} -> ${client.verifiedDomain}`).join(", ")}`);
   console.log(`Discovery URL: ${issuer}/.well-known/openid-configuration`);
   console.log("Client secret and admin token loaded from environment");
 });
+
+
+function loadOidcClients() {
+  const fromJson = String(process.env.OIDC_CLIENTS_JSON || "").trim();
+  const configs = fromJson ? parseOidcClientsJson(fromJson) : [{
+    client_id: legacyClientId,
+    client_secret: legacyClientSecret,
+    verified_domain: legacyVerifiedDomain,
+    allowed_redirect_uris: legacyAllowedRedirectUris
+  }];
+
+  const normalized = configs.map(normalizeOidcClientConfig);
+  if (!normalized.length) {
+    throw new Error("At least one OIDC client is required");
+  }
+
+  const seen = new Set();
+  for (const client of normalized) {
+    if (seen.has(client.clientId)) {
+      throw new Error(`Duplicate OIDC client_id: ${client.clientId}`);
+    }
+    seen.add(client.clientId);
+  }
+  return normalized;
+}
+
+function parseOidcClientsJson(raw) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`OIDC_CLIENTS_JSON is not valid JSON: ${error.message}`);
+  }
+
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && typeof parsed === "object") {
+    return Object.entries(parsed).map(([clientId, config]) => ({ client_id: clientId, ...config }));
+  }
+  throw new Error("OIDC_CLIENTS_JSON must be an object or array");
+}
+
+function normalizeOidcClientConfig(config) {
+  const clientIdValue = String(config.client_id || config.clientId || "").trim();
+  const clientSecretValue = String(config.client_secret || config.clientSecret || "");
+  const verifiedDomainValue = normalizeDomain(config.verified_domain || config.verifiedDomain || config.domain || legacyVerifiedDomain);
+  const redirectUris = normalizeRedirectUris(config.allowed_redirect_uris ?? config.allowedRedirectUris ?? config.redirect_uris ?? config.redirectUris ?? "");
+
+  if (!clientIdValue) throw new Error("OIDC client is missing client_id");
+  if (!clientSecretValue) throw new Error(`OIDC client ${clientIdValue} is missing client_secret`);
+  if (!verifiedDomainValue) throw new Error(`OIDC client ${clientIdValue} is missing verified_domain`);
+
+  return {
+    clientId: clientIdValue,
+    clientSecret: clientSecretValue,
+    verifiedDomain: verifiedDomainValue,
+    allowedRedirectUris: redirectUris,
+    subNamespace: String(config.sub_namespace || config.subNamespace || (usingMultiClientConfig ? clientIdValue : "legacy")).trim() || clientIdValue
+  };
+}
+
+function normalizeRedirectUris(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item || "").trim()).filter(Boolean);
+  }
+  return parseCsv(value);
+}
+
+function normalizeDomain(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^@+/, "");
+}
 
 function assertProductionSecrets() {
   const productionLike = process.env.NODE_ENV === "production" || issuer.startsWith("https://");
   if (!productionLike) return;
 
   const defaultSecrets = new Set(["dev-secret-change-me", "dev-admin-token-change-me"]);
-  if (defaultSecrets.has(clientSecret) || defaultSecrets.has(adminToken)) {
-    throw new Error("Refusing to start in production with default OIDC_CLIENT_SECRET or ADMIN_TOKEN");
-  }
-  if (clientSecret.length < 32 || adminToken.length < 32) {
-    throw new Error("Refusing to start in production: OIDC_CLIENT_SECRET and ADMIN_TOKEN must be at least 32 characters");
-  }
-  if (!allowedRedirectUris.length) {
-    throw new Error("Refusing to start in production without ALLOWED_REDIRECT_URIS");
+  for (const client of clients) {
+    if (defaultSecrets.has(client.clientSecret) || defaultSecrets.has(adminToken)) {
+      throw new Error("Refusing to start in production with default OIDC_CLIENT_SECRET or ADMIN_TOKEN");
+    }
+    if (client.clientSecret.length < 32 || adminToken.length < 32) {
+      throw new Error("Refusing to start in production: every OIDC client secret and ADMIN_TOKEN must be at least 32 characters");
+    }
+    if (!client.allowedRedirectUris.length) {
+      throw new Error(`Refusing to start in production without redirect URIs for client ${client.clientId}`);
+    }
   }
 }
 
@@ -236,7 +315,7 @@ function applySecurityHeaders(req, res, url) {
 }
 
 function allowedRedirectOrigins() {
-  return [...new Set(allowedRedirectUris.map((uri) => {
+  return [...new Set(clients.flatMap((client) => client.allowedRedirectUris).map((uri) => {
     try {
       return new URL(uri).origin;
     } catch {
@@ -252,10 +331,11 @@ function handleAuthorize(req, res, url) {
     sendText(res, 400, validation.error);
     return;
   }
+  const client = validation.client;
 
   const authRequest = {
     id: crypto.randomUUID(),
-    clientId: query.client_id,
+    clientId: client.clientId,
     redirectUri: query.redirect_uri,
     scope: query.scope || "openid email profile",
     state: query.state,
@@ -328,7 +408,14 @@ async function handleLogin(req, res) {
     return;
   }
 
-  const result = await bindUserToInvite(username, inviteCode);
+  const client = clientsById.get(authRequest.clientId);
+  if (!client) {
+    logLoginEvent(req, "client_missing", { username, clientId: authRequest.clientId });
+    sendHtml(res, renderLoginPage({ error: "SSO 客户端配置不存在，请联系管理员。", username, hasRequest: true, csrfToken: loginCsrfToken(authRequest), authRequestToken: authToken }), 400);
+    return;
+  }
+
+  const result = await bindUserToInvite(username, inviteCode, client);
   if (result.error) {
     logLoginEvent(req, "invite_error", { username, reason: result.error });
     sendHtml(res, renderLoginPage({ error: result.error, username, hasRequest: true, csrfToken: loginCsrfToken(authRequest), authRequestToken: authToken }), 400);
@@ -360,7 +447,8 @@ async function handleLogin(req, res) {
 async function handleToken(req, res) {
   const body = await readFormBody(req);
   const auth = parseClientAuth(req, body);
-  if (auth.clientId !== clientId || auth.clientSecret !== clientSecret) {
+  const client = clientsById.get(auth.clientId);
+  if (!client || !constantTimeEqual(String(auth.clientSecret || ""), client.clientSecret)) {
     sendJson(res, { error: "invalid_client" }, 401);
     return;
   }
@@ -390,6 +478,7 @@ async function handleToken(req, res) {
   const accessToken = crypto.randomBytes(32).toString("base64url");
   accessTokens.set(accessToken, {
     userId: user.id,
+    clientId: auth.clientId,
     expiresAt: Date.now() + 3600 * 1000
   });
   const now = Math.floor(Date.now() / 1000);
@@ -667,13 +756,14 @@ function validateAuthorizeRequest(query) {
   if (query.response_type !== "code") {
     return { error: "response_type must be code" };
   }
-  if (query.client_id !== clientId) {
+  const client = clientsById.get(query.client_id);
+  if (!client) {
     return { error: "unknown client_id" };
   }
   if (!query.redirect_uri) {
     return { error: "redirect_uri is required" };
   }
-  if (allowedRedirectUris.length > 0 && !allowedRedirectUris.includes(query.redirect_uri)) {
+  if (client.allowedRedirectUris.length > 0 && !client.allowedRedirectUris.includes(query.redirect_uri)) {
     return { error: "redirect_uri is not allowed" };
   }
   if (!String(query.scope || "").split(" ").includes("openid")) {
@@ -682,7 +772,7 @@ function validateAuthorizeRequest(query) {
   if (query.code_challenge_method && !["S256", "plain"].includes(query.code_challenge_method)) {
     return { error: "unsupported code_challenge_method" };
   }
-  return {};
+  return { client };
 }
 
 function verifyPkce(codeRecord, codeVerifier) {
@@ -695,7 +785,7 @@ function verifyPkce(codeRecord, codeVerifier) {
   return constantTimeEqual(codeVerifier, codeRecord.codeChallenge);
 }
 
-async function bindUserToInvite(username, inviteCode) {
+async function bindUserToInvite(username, inviteCode, client = defaultClient) {
   if (!isValidUsername(username)) {
     return { error: "用户名只能包含字母、数字、点、下划线和短横线，长度 3-40 位。" };
   }
@@ -711,7 +801,7 @@ async function bindUserToInvite(username, inviteCode) {
     return { error: "这个邀请码不属于该用户名。" };
   }
 
-  const userId = stableUserId(username);
+  const userId = stableUserId(username, client.subNamespace);
   const existingUser = users.get(userId);
   const usedUserIds = inviteUsedUserIds(invite);
   const hasUsedReusableInvite = Boolean(invite.reusable && usedUserIds.has(userId));
@@ -739,7 +829,9 @@ async function bindUserToInvite(username, inviteCode) {
   const user = {
     id: userId,
     username,
-    email: `${username}@${verifiedDomain}`.toLowerCase(),
+    email: `${username}@${client.verifiedDomain}`.toLowerCase(),
+    clientId: client.clientId,
+    verifiedDomain: client.verifiedDomain,
     oidcSub: userId,
     givenName: username,
     familyName: "User",
@@ -794,8 +886,9 @@ function userClaims(user) {
   };
 }
 
-function stableUserId(username) {
-  return `user_${crypto.createHash("sha256").update(username.toLowerCase()).digest("hex").slice(0, 24)}`;
+function stableUserId(username, namespace = defaultClient.subNamespace) {
+  const seed = namespace === "legacy" ? username.toLowerCase() : `${namespace}:${username.toLowerCase()}`;
+  return `user_${crypto.createHash("sha256").update(seed).digest("hex").slice(0, 24)}`;
 }
 
 function isValidUsername(username) {
@@ -1046,8 +1139,10 @@ function verifyAdminCsrf(req, body) {
 }
 
 function signAuthRequest(authRequest) {
+  const client = clientsById.get(authRequest.clientId);
+  if (!client) throw new Error(`Unknown client for auth request: ${authRequest.clientId}`);
   const payload = Buffer.from(JSON.stringify(authRequest)).toString("base64url");
-  const signature = crypto.createHmac("sha256", clientSecret).update(payload).digest("base64url");
+  const signature = crypto.createHmac("sha256", client.clientSecret).update(payload).digest("base64url");
   return `${payload}.${signature}`;
 }
 
@@ -1058,12 +1153,13 @@ function readAuthRequest(req) {
 function readAuthRequestToken(token) {
   const [payload, signature] = token.split(".");
   if (!payload || !signature) return null;
-  const expected = crypto.createHmac("sha256", clientSecret).update(payload).digest("base64url");
-  if (!constantTimeEqual(signature, expected)) return null;
   try {
     const authRequest = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    const client = clientsById.get(authRequest.clientId);
+    if (!client) return null;
+    const expected = crypto.createHmac("sha256", client.clientSecret).update(payload).digest("base64url");
+    if (!constantTimeEqual(signature, expected)) return null;
     if (Number(authRequest.exp || 0) <= Math.floor(Date.now() / 1000)) return null;
-    if (authRequest.clientId !== clientId) return null;
     if (!authRequest.redirectUri) return null;
     return authRequest;
   } catch {
@@ -1076,7 +1172,9 @@ function authRequestTokenFromUrlOrCookie(req, url) {
 }
 
 function loginCsrfToken(authRequest) {
-  return crypto.createHmac("sha256", clientSecret).update(`login-csrf:${authRequest.id}`).digest("base64url");
+  const client = clientsById.get(authRequest.clientId);
+  const secret = client?.clientSecret || legacyClientSecret;
+  return crypto.createHmac("sha256", secret).update(`login-csrf:${authRequest.id}`).digest("base64url");
 }
 
 function verifyLoginCsrf(authRequest, body) {
@@ -1184,6 +1282,9 @@ async function serveStatic(res, relativePath) {
 }
 
 function renderLoginPage({ error, username, hasRequest, csrfToken, authRequestToken = "" }) {
+  const authRequest = readAuthRequestToken(authRequestToken);
+  const client = authRequest ? clientsById.get(authRequest.clientId) : defaultClient;
+  const domainHint = client?.verifiedDomain || defaultClient.verifiedDomain;
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1213,7 +1314,7 @@ function renderLoginPage({ error, username, hasRequest, csrfToken, authRequestTo
         <input type="hidden" name="auth_request_token" value="${escapeHtml(authRequestToken)}" />
         <input type="hidden" name="csrf_token" value="${escapeHtml(csrfToken || "")}" />
         <label for="username">用户名</label>
-        <input id="username" name="username" value="${escapeHtml(username)}" placeholder="zhangsan 或 zhangsan@${escapeHtml(verifiedDomain)}" required minlength="3" maxlength="80" />
+        <input id="username" name="username" value="${escapeHtml(username)}" placeholder="zhangsan 或 zhangsan@${escapeHtml(domainHint)}" required minlength="3" maxlength="80" />
 
         <label for="invite_code">邀请码</label>
         <input id="invite_code" name="invite_code" placeholder="ALPHA-2026" required />
@@ -1332,7 +1433,8 @@ function renderAdminDashboard({ query, csrfToken }) {
         <h2>使用说明</h2>
         <p>普通邀请码第一次使用后会绑定用户名。指定用户名的邀请码只能给该用户名使用。可重复邀请码允许多个不同用户名使用。</p>
         <p>可重复邀请码可以设置最大使用次数。不同用户名首次使用会消耗次数，同一用户名后续登录不会重复消耗。</p>
-        <p>用户在 IdP 登录页只填用户名，不填完整邮箱；系统会自动生成 <code>用户名@${escapeHtml(verifiedDomain)}</code>。</p>
+        <p>用户在 IdP 登录页只填用户名，不填完整邮箱；系统会根据当前 ChatGPT client 自动生成对应域名邮箱。</p>
+        <p>当前 OIDC clients：${clients.map((client) => `<code>${escapeHtml(client.clientId)} → ${escapeHtml(client.verifiedDomain)}</code>`).join("，")}</p>
         <p>当前注册限速：<strong>${settings.rateLimitEnabled ? "已开启" : "已关闭"}</strong>。开启后同一 IP 在 ${escapeHtml(String(settings.rateLimitWindowSeconds))} 秒内最多提交 ${escapeHtml(String(settings.rateLimitMaxAttempts))} 次。</p>
       </section>
     </section>
