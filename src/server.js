@@ -364,11 +364,31 @@ function handleAuthorize(req, res, url) {
 
 async function handleLogin(req, res) {
   const body = await readFormBody(req);
-  const authToken = String(body.auth_request_token || "");
-  const authRequest = readAuthRequestToken(authToken) || readAuthRequest(req);
+  const bodyAuthToken = String(body.auth_request_token || "");
+  const cookieAuthToken = parseCookies(req).auth_request || "";
+  const bodyAuthRequest = readAuthRequestToken(bodyAuthToken);
+  const cookieAuthRequest = readAuthRequestToken(cookieAuthToken);
+  const authRequest = bodyAuthRequest || cookieAuthRequest;
+  const activeAuthToken = bodyAuthRequest ? bodyAuthToken : cookieAuthToken;
   const username = normalizeUsername(body.username);
   const inviteCode = normalizeInviteCode(body.invite_code);
   const limit = checkRateLimit(req);
+
+  if (bodyAuthToken && cookieAuthToken && bodyAuthToken !== cookieAuthToken) {
+    logLoginEvent(req, "auth_request_stale", { username });
+    sendHtml(
+      res,
+      renderLoginPage({
+        error: "这个登录页面已经不是最新的 SSO 请求，请关闭本页并从 ChatGPT 重新发起登录。",
+        username,
+        hasRequest: false,
+        csrfToken: "",
+        authRequestToken: ""
+      }),
+      400
+    );
+    return;
+  }
 
   if (!authRequest) {
     logLoginEvent(req, "auth_request_missing", { username });
@@ -393,7 +413,7 @@ async function handleLogin(req, res) {
         username,
         hasRequest: true,
         csrfToken: loginCsrfToken(authRequest),
-        authRequestToken: authToken
+        authRequestToken: activeAuthToken
       }),
       403
     );
@@ -408,7 +428,7 @@ async function handleLogin(req, res) {
         username,
         hasRequest: true,
         csrfToken: loginCsrfToken(authRequest),
-        authRequestToken: authToken
+        authRequestToken: activeAuthToken
       }),
       429
     );
@@ -418,14 +438,14 @@ async function handleLogin(req, res) {
   const client = clientsById.get(authRequest.clientId);
   if (!client) {
     logLoginEvent(req, "client_missing", { username, clientId: authRequest.clientId });
-    sendHtml(res, renderLoginPage({ error: "SSO 客户端配置不存在，请联系管理员。", username, hasRequest: true, csrfToken: loginCsrfToken(authRequest), authRequestToken: authToken }), 400);
+    sendHtml(res, renderLoginPage({ error: "SSO 客户端配置不存在，请联系管理员。", username, hasRequest: true, csrfToken: loginCsrfToken(authRequest), authRequestToken: activeAuthToken }), 400);
     return;
   }
 
   const result = await bindUserToInvite(username, inviteCode, client);
   if (result.error) {
     logLoginEvent(req, "invite_error", { username, reason: result.error });
-    sendHtml(res, renderLoginPage({ error: result.error, username, hasRequest: true, csrfToken: loginCsrfToken(authRequest), authRequestToken: authToken }), 400);
+    sendHtml(res, renderLoginPage({ error: result.error, username, hasRequest: true, csrfToken: loginCsrfToken(authRequest), authRequestToken: activeAuthToken }), 400);
     return;
   }
   logLoginEvent(req, "success", { username, userId: result.user.id });
