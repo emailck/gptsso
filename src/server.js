@@ -286,7 +286,14 @@ function assertProductionSecrets() {
 }
 
 function applySecurityHeaders(req, res, url) {
-  const formActionSources = ["'self'", ...allowedRedirectOrigins(), "https://setup.auth.openai.com", "https://auth.openai.com"].join(" ");
+  const formActionSources = [
+    "'self'",
+    ...allowedRedirectOrigins(),
+    "https://*.openai.com",
+    "https://openai.com",
+    "https://chatgpt.com",
+    "https://*.chatgpt.com"
+  ].join(" ");
   const csp = [
     "default-src 'self'",
     "base-uri 'none'",
