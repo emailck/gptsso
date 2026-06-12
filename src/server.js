@@ -286,7 +286,7 @@ function assertProductionSecrets() {
 }
 
 function applySecurityHeaders(req, res, url) {
-  const formActionSources = ["'self'", ...allowedRedirectOrigins()].join(" ");
+  const formActionSources = ["'self'", ...allowedRedirectOrigins(), "https://setup.auth.openai.com"].join(" ");
   const csp = [
     "default-src 'self'",
     "base-uri 'none'",
@@ -441,7 +441,7 @@ async function handleLogin(req, res) {
   if (authRequest.state) {
     redirectUrl.searchParams.set("state", authRequest.state);
   }
-  redirect(res, redirectUrl.toString());
+  redirect(res, redirectUrl.toString(), 303);
 }
 
 async function handleToken(req, res) {
@@ -1253,8 +1253,8 @@ function clearCookie(res, name) {
   res.setHeader("Set-Cookie", `${name}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax`);
 }
 
-function redirect(res, location) {
-  res.writeHead(302, { Location: location });
+function redirect(res, location, status = 302) {
+  res.writeHead(status, { Location: location });
   res.end();
 }
 
