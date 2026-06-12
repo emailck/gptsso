@@ -127,7 +127,7 @@ Current configured redirect URIs:
 
 ```text
 chatgpt -> oai-gpt.com -> https://external.auth.openai.com/sso/oidc/Qu9HjereRyZ8pn8WY5mGclg5J/callback
-chatgpt-oaigpt-top -> oaigpt.top -> https://external.auth.openai.com/sso/oidc/YyW1UwTagRySx9m5CxA0EmYFs/callback
+chatgpt-oaigpt-top -> aicoco.xyz -> https://external.auth.openai.com/sso/oidc/YyW1UwTagRySx9m5CxA0EmYFs/callback
 ```
 
 ### 3. Required claims
